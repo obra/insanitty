@@ -63,9 +63,16 @@ jobs:
           mkdir -p build
           ( cd inspo/fantastty/tools/remote-engine-helper/helper && GOFLAGS=-mod=mod go build -tags ghostty_vt -o "$GITHUB_WORKSPACE/build/fantastty-helper" . ) || true
 
+      - name: Build msquic (in-process QUIC for the remote workspace)
+        run: |
+          sudo apt-get install -y cmake ninja-build
+          git clone --recursive --depth 1 -b v2.4.10 https://github.com/microsoft/msquic.git "$RUNNER_TEMP/msquic"
+          cmake -S "$RUNNER_TEMP/msquic" -B "$RUNNER_TEMP/msquic/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/msquic/build"
+
       - name: Build app + .deb
         run: |
-          export GHOSTTY="$RUNNER_TEMP/ghostty"
+          export GHOSTTY="$RUNNER_TEMP/ghostty" MSQUIC="$RUNNER_TEMP/msquic"
           ./scripts/build-deb.sh
 
       - uses: actions/upload-artifact@v4
@@ -80,6 +87,8 @@ jobs:
         continue-on-error: true
         run: |
           sudo apt-get install -y xvfb matchbox-window-manager x11-utils xdotool imagemagick dbus-x11 tmux python3
-          export GHOSTTY="$RUNNER_TEMP/ghostty" LD_LIBRARY_PATH="$RUNNER_TEMP/ghostty/zig-out/lib"
+          export GHOSTTY="$RUNNER_TEMP/ghostty" MSQUIC="$RUNNER_TEMP/msquic"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/ghostty/zig-out/lib:$RUNNER_TEMP/msquic/build/bin/Release"
           ./scripts/e2e-scenario.sh
           ./scripts/e2e-layout-persistence.sh
+          ./scripts/e2e-remote-multipane.sh

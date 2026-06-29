@@ -16,9 +16,10 @@ import Glibc
 nonisolated(unsafe) var gapp: OpaquePointer?
 nonisolated(unsafe) var mainWindow: OpaquePointer?
 nonisolated(unsafe) var mainStack: OpaquePointer?
-nonisolated(unsafe) var remoteSurface: OpaquePointer?
-nonisolated(unsafe) var pendingGrid: Data?
-let gridLock = NSLock()
+nonisolated(unsafe) var remotePaneContainer: OpaquePointer?            // box holding the remote pane tree
+nonisolated(unsafe) var remotePaneSurfaces: [Int: OpaquePointer] = [:] // remote pane id → surface
+nonisolated(unsafe) var pendingFetcher: RemoteQuicFetcher?
+let remoteLock = NSLock()
 nonisolated(unsafe) var injectTries = 0
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
@@ -367,9 +368,17 @@ func makeWorkspacePage(index: Int) -> OpaquePointer? {
     return vbox
 }
 
-/// A "remote (QUIC)" workspace: an inert surface that insanitty paints with a grid fetched by
-/// its own remote stack — launch-or-resume the helper, then the SPKI-pinned native QUIC client
-/// renders the grid (see injectRemoteGrid), injected via insanitty_surface_inject_output.
+/// An inert surface for a remote pane: rendered only by injected output (no shell of its own).
+/// Ref-sunk so it survives re-parenting when the remote layout is (re)built.
+func makeRemotePaneSurface() -> OpaquePointer? {
+    guard let s = makeSilentTerminal() else { return nil }
+    g_object_ref_sink(raw(s))
+    return s
+}
+
+/// A "remote (QUIC)" workspace: insanitty fetches the remote workspace over QUIC (SPKI-pinned,
+/// in-process) and maps its panes onto a GtkPaned tree of inert surfaces, painting each via
+/// inject_output. The container is filled by injectRemoteGrid once the snapshot + keyframes arrive.
 func makeRemoteWorkspacePage() -> OpaquePointer? {
     let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
     let tabView = OP(adw_tab_view_new())
@@ -378,10 +387,9 @@ func makeRemoteWorkspacePage() -> OpaquePointer? {
     adw_tab_bar_set_view(P(tabBar), P(tabView))
     gtk_box_append(P(vbox), P(tabBar))
     gtk_box_append(P(vbox), P(tabView))
-    let term = makeTerminal("sleep 2592000") // inert; content arrives via inject
-    remoteSurface = term
-    let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
-    gtk_box_append(P(box), P(term))
+    let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
+    gtk_widget_set_vexpand(P(box), 1)
+    remotePaneContainer = box
     let page = OP(adw_tab_view_append(P(tabView), P(box)))
     adw_tab_page_set_title(P(page), "Remote (QUIC)")
     return vbox
@@ -452,27 +460,27 @@ func makeControlPaneSurface() -> OpaquePointer? {
     return s
 }
 
-/// Build the widget for a tmux pane layout: a leaf → its surface, a split → a (nested) GtkPaned.
-func buildPaneTree(_ node: TmuxLayoutNode) -> OpaquePointer? {
+/// Build the widget for a pane layout: a leaf → its surface (via `surfaceFor`), a split → a
+/// (nested) GtkPaned. Shared by tmux control mode and the remote workspace.
+func buildPaneTree(_ node: TmuxLayoutNode, _ surfaceFor: (Int) -> OpaquePointer?) -> OpaquePointer? {
     switch node {
     case .leaf(let pane):
-        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = makeControlPaneSurface() }
-        return ctrlPaneSurfaces[pane]
+        return surfaceFor(pane)
     case .horizontal(let kids):
-        return buildPaned(GTK_ORIENTATION_HORIZONTAL, kids)
+        return buildPaned(GTK_ORIENTATION_HORIZONTAL, kids, surfaceFor)
     case .vertical(let kids):
-        return buildPaned(GTK_ORIENTATION_VERTICAL, kids)
+        return buildPaned(GTK_ORIENTATION_VERTICAL, kids, surfaceFor)
     }
 }
 
-/// Fold an N-ary tmux split into nested binary GtkPaned widgets.
-func buildPaned(_ orientation: GtkOrientation, _ kids: [TmuxLayoutNode]) -> OpaquePointer? {
-    guard var acc = kids.first.flatMap({ buildPaneTree($0) }) else { return nil }
+/// Fold an N-ary split into nested binary GtkPaned widgets.
+func buildPaned(_ orientation: GtkOrientation, _ kids: [TmuxLayoutNode], _ surfaceFor: (Int) -> OpaquePointer?) -> OpaquePointer? {
+    guard var acc = kids.first.flatMap({ buildPaneTree($0, surfaceFor) }) else { return nil }
     for kid in kids.dropFirst() {
         let paned = OP(gtk_paned_new(orientation))!
         gtk_paned_set_resize_start_child(P(paned), 1); gtk_paned_set_resize_end_child(P(paned), 1)
         gtk_paned_set_start_child(P(paned), P(acc))
-        gtk_paned_set_end_child(P(paned), P(buildPaneTree(kid)))
+        gtk_paned_set_end_child(P(paned), P(buildPaneTree(kid, surfaceFor)))
         acc = paned
     }
     return acc
@@ -503,7 +511,11 @@ func rebuildWindowPanes(_ window: Int, _ tree: TmuxLayoutNode) {
         if let s = ctrlPaneSurfaces[pane], gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
     }
     while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
-    if let widget = buildPaneTree(tree) { gtk_box_append(P(container), P(widget)) }
+    let widget = buildPaneTree(tree) { pane in
+        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = makeControlPaneSurface() }
+        return ctrlPaneSurfaces[pane]
+    }
+    if let widget = widget { gtk_box_append(P(container), P(widget)) }
     // Release surfaces for panes that closed in this window.
     for pane in oldPanes.subtracting(newPanes) {
         if let s = ctrlPaneSurfaces.removeValue(forKey: pane) {
@@ -584,10 +596,6 @@ func makeControlModeWorkspacePage() -> OpaquePointer? {
     return vbox
 }
 
-/// Fetch the remote pane grid from the helper (over QUIC) on a background thread, then paint it
-/// into the surface on the GTK main thread (`g_idle_add`). Fetching off the main loop keeps the
-/// UI responsive while the helper completes its QUIC handshake — a synchronous fetch here would
-/// freeze input handling for the duration.
 /// Run a process (optionally feeding stdin) and return its stdout, or nil on failure.
 func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data? {
     let p = Process()
@@ -605,42 +613,80 @@ func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data?
     return data
 }
 
-/// Fetch the remote pane grid by driving insanitty's OWN remote stack on a background thread —
-/// launch-or-resume the helper for the bootstrap line, then the SPKI-pinned native QUIC client
-/// (tools/quic-client) attaches over QUIC and renders the grid — and paint it into the surface on
-/// the GTK main thread. Replaces the old bash → Go-probe → Python demo bridge.
+/// Fetch the remote workspace by driving insanitty's OWN remote stack on a background thread —
+/// launch-or-resume the helper for the bootstrap line, then connect in-process over QUIC
+/// (SPKI-pinned) and collect the snapshot + pane keyframes — and on the GTK main thread map the
+/// panes onto GtkPaned splits, painting each keyframe via inject_output. No subprocess for QUIC.
 func injectRemoteGrid() {
-    guard remoteSurface != nil else { return }
+    guard remotePaneContainer != nil else { return }
+    // Test hook: render a jsonl fixture of remote messages instead of connecting, to exercise the
+    // multi-pane mapping (the live multi-pane path needs the helper's --tmux-session, unavailable here).
+    if let fixture = ProcessInfo.processInfo.environment["INSANITTY_REMOTE_FIXTURE"] {
+        Thread.detachNewThread {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: fixture)) else { return }
+            let fetcher = RemoteQuicFetcher()
+            fetcher.loadFixture(data)
+            guard !fetcher.keyframes.isEmpty else { return }
+            remoteLock.lock(); pendingFetcher = fetcher; remoteLock.unlock()
+            g_idle_add(remoteRenderIdle, nil)
+        }
+        return
+    }
     Thread.detachNewThread {
         let helper = FileManager.default.isExecutableFile(atPath: "build/fantastty-helper")
             ? "build/fantastty-helper" : "/tmp/fantastty-helper"
-        // 1) launch-or-resume → the FANTASTTY_REMOTE bootstrap line.
         guard let bootData = runProcess(helper,
                 ["launch-or-resume", "insanitty-remote-gui", "--ttl", "8h", "--key-ttl", "30s"]),
               let line = String(decoding: bootData, as: UTF8.self).split(separator: "\n")
-                .map(String.init).first(where: { $0.hasPrefix("FANTASTTY_REMOTE ") }) else {
+                .map(String.init).first(where: { $0.hasPrefix("FANTASTTY_REMOTE ") }),
+              let boot = try? RemoteBootstrapLine.parse(line) else {
             FileHandle.standardError.write(Data("insanitty: remote bootstrap failed\n".utf8)); return
         }
-        // 2) native SPKI-pinned QUIC client attaches and renders the grid to stdout.
-        guard let grid = runProcess("build/quic-client", ["--bootstrap"], stdin: line + "\n"),
-              !grid.isEmpty else {
+        let fetcher = RemoteQuicFetcher(bootstrap: boot)
+        guard fetcher.fetch(host: boot.host, port: boot.port), !fetcher.keyframes.isEmpty else {
             FileHandle.standardError.write(Data("insanitty: native QUIC fetch failed\n".utf8)); return
         }
-        gridLock.lock(); pendingGrid = grid; gridLock.unlock()
-        g_idle_add(injectGridIdle, nil)
-        FileHandle.standardError.write(Data("insanitty: injected \(grid.count) bytes of remote grid (native QUIC)\n".utf8))
+        remoteLock.lock(); pendingFetcher = fetcher; remoteLock.unlock()
+        g_idle_add(remoteRenderIdle, nil)
     }
 }
 
-/// Main-thread tail of injectRemoteGrid: paint the fetched grid into the remote surface.
-let injectGridIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
-    gridLock.lock(); let data = pendingGrid; pendingGrid = nil; gridLock.unlock()
-    if let data = data, let surface = remoteSurface {
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, data.count)
+/// Main-thread tail of injectRemoteGrid: lay out the remote panes and paint each keyframe.
+let remoteRenderIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
+    remoteLock.lock(); let fetcher = pendingFetcher; pendingFetcher = nil; remoteLock.unlock()
+    if let fetcher = fetcher { renderRemoteWorkspace(fetcher) }
+    return 0 // G_SOURCE_REMOVE
+}
+
+/// Map the remote workspace's panes (the active window's layout) onto a GtkPaned tree of inert
+/// surfaces, then inject each pane's keyframe (rendered to ANSI).
+func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
+    guard let container = remotePaneContainer else { return }
+    let windows = fetcher.snapshot?.windows ?? []
+    let layout = (windows.first(where: { $0.isActive }) ?? windows.first)?.layout
+    let tree: TmuxLayoutNode
+    if let layout = layout, let parsed = TmuxLayoutParser.parse(layout) {
+        tree = parsed
+    } else if let pane = fetcher.keyframes.keys.sorted().first {
+        tree = .leaf(pane: pane)   // no usable layout → a single pane
+    } else { return }
+
+    for (_, s) in remotePaneSurfaces where gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+    while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
+    let widget = buildPaneTree(tree) { pane in
+        if remotePaneSurfaces[pane] == nil { remotePaneSurfaces[pane] = makeRemotePaneSurface() }
+        return remotePaneSurfaces[pane]
+    }
+    if let widget = widget { gtk_box_append(P(container), P(widget)) }
+
+    for (pane, kf) in fetcher.keyframes {
+        guard let surface = remotePaneSurfaces[pane] else { continue }
+        let ansi = Data(RemoteGridRenderer.ansi(for: kf).utf8)
+        ansi.withUnsafeBytes { raw in
+            insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, ansi.count)
         }
     }
-    return 0 // G_SOURCE_REMOVE
+    FileHandle.standardError.write(Data("insanitty: rendered \(fetcher.keyframes.count)-pane remote workspace (native QUIC)\n".utf8))
 }
 
 /// Sidebar row selected → switch to that workspace.
@@ -772,7 +818,7 @@ func buildWindow() {
     let injectCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
         injectRemoteGrid()
         injectTries += 1
-        return injectTries < 3 ? 1 : 0 // repeat up to 3x, ~3s apart
+        return injectTries < 6 ? 1 : 0 // re-fetch ~6x, 3s apart (picks up remote layout changes)
     }
     g_timeout_add(3000, injectCb, nil)
 }

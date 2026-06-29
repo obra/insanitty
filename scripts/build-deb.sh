@@ -13,6 +13,8 @@ VERSION="${VERSION:-0.1.0~dev}"
 ARCH="${ARCH:-$(dpkg --print-architecture 2>/dev/null || echo amd64)}"
 GHOSTTY="${GHOSTTY:-$PWD/vendor/ghostty}"   # scripts/build-ghostty.sh builds the lib here
 ZLIB="$GHOSTTY/zig-out/lib"; ZSHARE="$GHOSTTY/zig-out/share/ghostty"
+MQ="${MSQUIC:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/msquic}"
+MQLIB="$MQ/build/bin/Release"
 HELPER="${HELPER:-build/fantastty-helper}"; [ -x "$HELPER" ] || HELPER=/tmp/fantastty-helper
 
 PKG=insanitty
@@ -20,15 +22,18 @@ ROOT="build/deb/${PKG}_${VERSION}_${ARCH}"
 say() { printf '\n== %s ==\n' "$*"; }
 
 [ -f "$ZLIB/libghostty-gtk.so" ] || { echo "missing libghostty-gtk.so ($ZLIB) — run scripts/build-ghostty.sh + the insanitty-lib build"; exit 1; }
+[ -f "$MQLIB/libmsquic.so" ] || { echo "missing libmsquic.so ($MQLIB) — build msquic (set MSQUIC)"; exit 1; }
 
 say "1/4 Build the app with install rpath (/usr/lib/$PKG)"
-RPATH="/usr/lib/$PKG" ./scripts/build-app.sh
+RPATH="/usr/lib/$PKG" MQRPATH="/usr/lib/$PKG" ./scripts/build-app.sh
 
 say "2/4 Stage the package tree"
 rm -rf "$ROOT"
 install -Dm755 build/insanitty                "$ROOT/usr/lib/$PKG/insanitty-bin"
 # Engine lib (+ versioned soname links)
 for f in "$ZLIB"/libghostty-gtk.so*; do install -Dm644 "$f" "$ROOT/usr/lib/$PKG/$(basename "$f")"; done
+# msquic (in-process QUIC for the remote workspace) — the app's rpath finds it at /usr/lib/$PKG
+for f in "$MQLIB"/libmsquic.so*; do [ -e "$f" ] && install -Dm644 "$f" "$ROOT/usr/lib/$PKG/$(basename "$f")"; done
 # Ghostty resources (terminfo, themes, etc.)
 mkdir -p "$ROOT/usr/share/$PKG"; cp -r "$ZSHARE" "$ROOT/usr/share/$PKG/ghostty"
 # Remote-engine helper + its VT lib (best-effort; remote needs these at runtime)
@@ -58,7 +63,7 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: insanitty <jesse@primeradiant.com>
 Installed-Size: $INSTALLED_KB
-Depends: libgtk-4-1, libadwaita-1-0, libwebkitgtk-6.0-4, tmux
+Depends: libgtk-4-1, libadwaita-1-0, libwebkitgtk-6.0-4, libssl3, tmux
 Description: Terminal workspace manager (native Linux port of Fantastty)
  insanitty is a libghostty-based terminal workspace manager: persistent
  tmux-backed workspaces with tabs, splits, browser tabs, and an SSH/QUIC
