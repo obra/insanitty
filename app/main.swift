@@ -49,6 +49,19 @@ func metaFor(_ id: String) -> WorkspaceMetadata {
     return m
 }
 
+nonisolated(unsafe) var lastActiveTick = Date()
+
+/// Accumulate focused time onto the active workspace (idle-excluded: only counts while the window
+/// is the active window). A long gap (suspend, unfocus) is dropped so wall-clock isn't over-counted.
+let activeTimeCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
+    let now = Date(); let elapsed = now.timeIntervalSince(lastActiveTick); lastActiveTick = now
+    guard let win = mainWindow, gtk_window_is_active(P(win)) != 0,
+          let id = currentWorkspaceID(), elapsed > 0, elapsed < 30 else { return 1 }
+    var m = metaFor(id); m.totalActiveSeconds += elapsed; workspaceMeta[id] = m
+    saveWorkspaceMeta()
+    return 1
+}
+
 /// Apply the appearance mode to the libadwaita chrome (sidebar/header bar light/dark). `.system`
 /// follows the desktop preference; `.light`/`.dark` force it.
 func applyAppearance(_ mode: AppearanceMode) {
@@ -201,6 +214,15 @@ func registerWorkspace(_ page: OpaquePointer, name: String, id: String, index: I
     gtk_list_box_row_set_child(P(row), P(box))
     gtk_list_box_append(P(list), P(row))
 
+    // Right-click → archive/trash this workspace. Persisted workspaces only (not the remote demo).
+    if index >= 0 {
+        let rclick = OP(gtk_gesture_click_new())
+        gtk_gesture_single_set_button(P(rclick), 3)
+        g_signal_connect_data(raw(rclick), "pressed", unsafeBitCast(rowRightClickCb, to: GCallback.self),
+                              UnsafeMutableRawPointer(bitPattern: index), nil, GConnectFlags(rawValue: 0))
+        gtk_widget_add_controller(P(row), P(rclick))
+    }
+
     tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable, name: name, index: index))
     return tiles.count - 1
 }
@@ -250,6 +272,67 @@ func addWorkspace() {
     workspaceCounter += 1
     let tileIdx = registerWorkspace(page, name: WorkspaceName.generate(), id: "ws\(idx)", index: idx)
     gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(tileIdx)))))
+}
+
+/// Archive (or trash) a workspace: stamp its metadata, drop it from the active sidebar/layout, and
+/// kill its tmux session. The notes + metadata survive in workspaces.json for a future restore view.
+func archiveWorkspace(tmuxIndex: Int, trash: Bool) {
+    guard let list = sidebarList, let arrayIdx = tiles.firstIndex(where: { $0.index == tmuxIndex }) else { return }
+    let tile = tiles[arrayIdx]
+    let id = "insanitty-ws-\(tmuxIndex)"
+    var m = metaFor(id)
+    if trash { m.setTrashed(true, at: Date()) } else { m.setArchived(true, at: Date()) }
+    workspaceMeta[id] = m; saveWorkspaceMeta()
+
+    if let row = OP(gtk_list_box_get_row_at_index(P(list), Int32(arrayIdx))) { gtk_list_box_remove(P(list), P(row)) }
+    if let stack = mainStack { gtk_stack_remove(P(stack), P(tile.page)) }
+    tiles.remove(at: arrayIdx)
+    runDetached("tmux kill-session -t \(id) 2>/dev/null")
+
+    currentWorkspace = -1   // skip the freeze-old step in selectWorkspace; nothing valid to freeze
+    if !tiles.isEmpty {
+        let sel = min(arrayIdx, tiles.count - 1)
+        gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(sel)))))
+    }
+    saveLayout()
+}
+
+nonisolated(unsafe) var contextMenuTmuxIndex = -1
+nonisolated(unsafe) var contextPopover: OpaquePointer?
+
+let archiveClickCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in
+    if let p = contextPopover { gtk_popover_popdown(P(p)) }
+    archiveWorkspace(tmuxIndex: contextMenuTmuxIndex, trash: false)
+}
+let trashClickCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in
+    if let p = contextPopover { gtk_popover_popdown(P(p)) }
+    archiveWorkspace(tmuxIndex: contextMenuTmuxIndex, trash: true)
+}
+let popClosedCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { pop, _ in
+    gtk_widget_unparent(P(pop))
+    if raw(contextPopover) == raw(pop) { contextPopover = nil }
+}
+
+/// Right-click a sidebar row → a popover with Archive / Move to Trash for that workspace.
+let rowRightClickCb: @convention(c) (OpaquePointer?, Int32, Double, Double, UnsafeMutableRawPointer?) -> Void = { gesture, _, x, y, ud in
+    contextMenuTmuxIndex = Int(bitPattern: ud)
+    guard let widget = OP(gtk_event_controller_get_widget(P(gesture))) else { return }
+    let pop = OP(gtk_popover_new())!
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2))!
+    for (label, cb) in [("Archive", archiveClickCb), ("Move to Trash", trashClickCb)] {
+        let btn = OP(gtk_button_new_with_label(label))!
+        gtk_button_set_has_frame(P(btn), 0)
+        gtk_widget_set_halign(P(btn), GTK_ALIGN_FILL)
+        g_signal_connect_data(raw(btn), "clicked", unsafeBitCast(cb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+        gtk_box_append(P(vbox), P(btn))
+    }
+    gtk_popover_set_child(P(pop), P(vbox))
+    gtk_widget_set_parent(P(pop), P(widget))
+    var rect = GdkRectangle(x: Int32(x), y: Int32(y), width: 1, height: 1)
+    gtk_popover_set_pointing_to(P(pop), &rect)
+    g_signal_connect_data(raw(pop), "closed", unsafeBitCast(popClosedCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    contextPopover = pop
+    gtk_popover_popup(P(pop))
 }
 
 /// A flowbox tile in the overview was clicked → switch to that workspace and close the overview.
@@ -935,7 +1018,7 @@ let notesBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Voi
 
 /// Persist the layout when the window is closing (returns PROPAGATE so the close proceeds).
 let closeRequestCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> gboolean = { _, _ in
-    saveLayout(); return 0
+    saveLayout(); saveWorkspaceMeta(); return 0
 }
 
 func buildWindow() {
@@ -1064,6 +1147,10 @@ func buildWindow() {
         injectRemoteGrid(); return 1
     }
     g_timeout_add(1500, injectCb, nil)
+
+    // Accumulate active (focused) time onto the current workspace.
+    lastActiveTick = Date()
+    g_timeout_add(5000, activeTimeCb, nil)
 }
 
 setvbuf(stdout, nil, Int32(_IONBF), 0)
