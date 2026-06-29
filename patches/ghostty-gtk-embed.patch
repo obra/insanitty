@@ -38,10 +38,10 @@ index 8ef7701e2..5c41a5ad3 100644
      // xcframework above, not this one.
 diff --git a/include/insanitty.h b/include/insanitty.h
 new file mode 100644
-index 000000000..167d8abfc
+index 000000000..494bcec6a
 --- /dev/null
 +++ b/include/insanitty.h
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,21 @@
 +#pragma once
 +/* insanitty <-> Ghostty GTK embedding C ABI. See src/apprt/gtk/c_api.zig. */
 +#include <gtk/gtk.h>
@@ -54,6 +54,9 @@ index 000000000..167d8abfc
 +
 +/* Like insanitty_surface_new but runs `cmd` (shell-expanded) — e.g. tmux attach. */
 +GtkWidget *insanitty_surface_new_command(const char *cmd);
++
++/* Inject raw terminal output into a surface (bypassing the PTY): tmux %output / remote paint. */
++void insanitty_surface_inject_output(GtkWidget *surface, const char *bytes, size_t len);
 +
 +/* Run Ghostty's integrated loop (blocks; required for the terminal to render). */
 +void insanitty_app_run(void);
@@ -95,10 +98,10 @@ index b68be92d0..8342687b4 100644
          step.addCSourceFile(.{
 diff --git a/src/insanitty_c_api.zig b/src/insanitty_c_api.zig
 new file mode 100644
-index 000000000..1340aeb79
+index 000000000..1040cc446
 --- /dev/null
 +++ b/src/insanitty_c_api.zig
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,70 @@
 +//! Minimal C ABI to embed the Ghostty GTK terminal surface into a host GTK4
 +//! application (insanitty). The host owns its window/chrome; this TU owns the
 +//! libghostty App, the GhosttyApplication singleton, and the integrated run loop.
@@ -147,6 +150,16 @@ index 000000000..1340aeb79
 +export fn insanitty_surface_new_command(cmd: [*:0]const u8) ?*anyopaque {
 +    const surface = Surface.new(.{ .command = .{ .shell = std.mem.span(cmd) } });
 +    return @ptrCast(surface.as(gtk.Widget));
++}
++
++/// Inject raw terminal output into a surface's VT parser, bypassing the PTY. This is the
++/// render path for tmux control-mode `%output` and for painting remote content. `widget`
++/// is the GtkWidget* returned by insanitty_surface_new (a GhosttySurface).
++export fn insanitty_surface_inject_output(widget: ?*anyopaque, bytes: [*]const u8, len: usize) void {
++    const w = widget orelse return;
++    const surface: *Surface = @ptrCast(@alignCast(w));
++    const core = surface.core() orelse return;
++    core.io.processOutput(bytes[0..len]);
 +}
 +
 +/// Run Ghostty's integrated event loop (pumps core_app.tick so the renderer draws).

@@ -48,6 +48,16 @@ export fn insanitty_surface_new_command(cmd: [*:0]const u8) ?*anyopaque {
     return @ptrCast(surface.as(gtk.Widget));
 }
 
+/// Inject raw terminal output into a surface's VT parser, bypassing the PTY. This is the
+/// render path for tmux control-mode `%output` and for painting remote content. `widget`
+/// is the GtkWidget* returned by insanitty_surface_new (a GhosttySurface).
+export fn insanitty_surface_inject_output(widget: ?*anyopaque, bytes: [*]const u8, len: usize) void {
+    const w = widget orelse return;
+    const surface: *Surface = @ptrCast(@alignCast(w));
+    const core = surface.core() orelse return;
+    core.io.processOutput(bytes[0..len]);
+}
+
 /// Run Ghostty's integrated event loop (pumps core_app.tick so the renderer draws).
 /// Blocks until quit.
 export fn insanitty_app_run() void {

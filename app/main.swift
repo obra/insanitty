@@ -16,6 +16,8 @@ import Glibc
 nonisolated(unsafe) var gapp: OpaquePointer?
 nonisolated(unsafe) var mainWindow: OpaquePointer?
 nonisolated(unsafe) var mainStack: OpaquePointer?
+nonisolated(unsafe) var remoteSurface: OpaquePointer?
+nonisolated(unsafe) var injectTries = 0
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
 nonisolated(unsafe) var surfaces = Set<OpaquePointer>()
 
@@ -134,6 +136,50 @@ func makeWorkspacePage(index: Int) -> OpaquePointer? {
     return vbox
 }
 
+/// A "remote (QUIC)" workspace: an inert surface that insanitty paints by injecting a grid
+/// fetched from the real remote-engine helper over QUIC (scripts/remote-grid-ansi.sh +
+/// insanitty_surface_inject_output). Demonstrates the remote feature set inside the GUI.
+func makeRemoteWorkspacePage() -> OpaquePointer? {
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
+    let tabView = OP(adw_tab_view_new())
+    gtk_widget_set_vexpand(P(tabView), 1)
+    let tabBar = OP(adw_tab_bar_new())
+    adw_tab_bar_set_view(P(tabBar), P(tabView))
+    gtk_box_append(P(vbox), P(tabBar))
+    gtk_box_append(P(vbox), P(tabView))
+    let term = makeTerminal("sleep 2592000") // inert; content arrives via inject
+    remoteSurface = term
+    let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
+    gtk_box_append(P(box), P(term))
+    let page = OP(adw_tab_view_append(P(tabView), P(box)))
+    adw_tab_page_set_title(P(page), "Remote (QUIC)")
+    return vbox
+}
+
+/// Fetch the remote pane grid from the helper (over QUIC) and inject it into the surface.
+func injectRemoteGrid() {
+    guard let surface = remoteSurface else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/bash")
+    p.arguments = ["scripts/remote-grid-ansi.sh", "insanitty-remote-gui"]
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = FileHandle.nullDevice
+    do {
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        if !data.isEmpty {
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, data.count)
+            }
+        }
+        FileHandle.standardError.write(Data("insanitty: injected \(data.count) bytes of remote grid\n".utf8))
+    } catch {
+        FileHandle.standardError.write(Data("insanitty: remote fetch failed: \(error)\n".utf8))
+    }
+}
+
 func buildWindow() {
     let win = OP(adw_application_window_new(P(gapp)))
     mainWindow = win
@@ -148,6 +194,9 @@ func buildWindow() {
     for i in 0..<3 {
         gtk_stack_add_titled(P(stack), P(makeWorkspacePage(index: i)), "ws\(i)", WorkspaceName.generate())
     }
+    gtk_stack_add_titled(P(stack), P(makeRemoteWorkspacePage()), "remote", "remote (QUIC)")
+    // Show the remote workspace first so its surface realizes before we inject its grid.
+    gtk_stack_set_visible_child_name(P(stack), "remote")
 
     let sidebar = OP(gtk_stack_sidebar_new())
     gtk_stack_sidebar_set_stack(P(sidebar), P(stack))
@@ -189,6 +238,15 @@ func buildWindow() {
     gtk_widget_add_controller(P(win), P(keyctl))
 
     gtk_window_present(P(win))
+
+    // Once the remote surface has realized, fetch its grid from the helper (QUIC) + inject.
+    // Re-inject a few times (the surface realizes slightly after the window maps).
+    let injectCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
+        injectRemoteGrid()
+        injectTries += 1
+        return injectTries < 3 ? 1 : 0 // repeat up to 3x, ~3s apart
+    }
+    g_timeout_add(3000, injectCb, nil)
 }
 
 setvbuf(stdout, nil, Int32(_IONBF), 0)

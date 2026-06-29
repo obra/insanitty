@@ -11,6 +11,9 @@ GtkWidget *insanitty_surface_new(void);
 /* Like insanitty_surface_new but runs `cmd` (shell-expanded) — e.g. tmux attach. */
 GtkWidget *insanitty_surface_new_command(const char *cmd);
 
+/* Inject raw terminal output into a surface (bypassing the PTY): tmux %output / remote paint. */
+void insanitty_surface_inject_output(GtkWidget *surface, const char *bytes, size_t len);
+
 /* Run Ghostty's integrated loop (blocks; required for the terminal to render). */
 void insanitty_app_run(void);
 
