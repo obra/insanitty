@@ -78,4 +78,11 @@ import -window root "$OUT/e2e-5-overview.png" 2>/dev/null
 grep -q "overview shown" /tmp/app-e2e.log || fail "Exposé overview did not open"
 echo "PASS scenario 5: Exposé overview opened with workspace thumbnails"
 
+# Scenario 6: a real browser tab (Ctrl+B) — nav bar (back/forward/reload) + address entry.
+xdotool key ctrl+o; sleep 1   # close the overview from scenario 5
+xdotool key ctrl+b; sleep 3
+import -window root "$OUT/e2e-6-browser.png" 2>/dev/null
+grep -q "browser tab opened" /tmp/app-e2e.log || fail "browser tab did not open"
+echo "PASS scenario 6: real browser tab (nav bar + address) opened"
+
 echo "E2E PASS"

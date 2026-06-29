@@ -35,7 +35,7 @@ The sections below are the unvarnished detail.
 | Workspace sidebar + switching | **REAL** (`buildWindow`, `GtkStack`+`GtkStackSidebar`) | Switching works. But workspace **list/names are regenerated every launch** — not persisted (Fantastty persists them in `layout.json`). |
 | Terminal tabs | **REAL** (`addTab`, AdwTabView, Ctrl+T) | New tabs are plain shells (not tmux-backed → not persistent). |
 | Splits / panes | **PARTIAL** (`splitFocused`, GtkPaned, Ctrl+D / Ctrl+Shift+D) | Real focus-aware GtkPaned tree. But splits are **local default shells**, not tmux panes; `SplitGeometry` (ported + tested) is **not used** — no min-size/ratio clamping. |
-| Browser tabs (WebKit, persisted URL) | **DEMO** (`newBrowserTabInCurrentWorkspace`, Ctrl+B) | Creates a real WebKitGTK view but only `load_html` of a **hardcoded page** — no address bar, navigation, or URL persistence. |
+| Browser tabs (WebKit, persisted URL) | **REAL** (`newBrowserTabInCurrentWorkspace`, Ctrl+B) | WebKitGTK view with a nav bar (back/forward/reload + address entry → `webkit_web_view_load_uri`), title/URL sync. Loads live pages (`docs/images/e2e-6-browser.png`). URL *persistence* across restart still pending (no layout.json yet). |
 
 ## Sidebar snapshots, overview & browser  *(explicitly in the parity bar)*
 
@@ -43,7 +43,7 @@ The sections below are the unvarnished detail.
 |---|---|---|
 | **Sidebar snapshots** — each sidebar tab shows a **live thumbnail** of its content: terminal rendered to an image (`TerminalThumbnailRenderer`), browser via `WKSnapshotConfiguration`. The active session updates live (debounced 150 ms); inactive tabs show the last snapshot (`SidebarThumbnailView.swift`). | **REAL** (`registerWorkspace`/`selectWorkspace`, `app/main.swift`) | Custom `GtkListBox` sidebar; each workspace row is a `GtkPicture` of a `GtkWidgetPaintable` of the page — live for the active workspace, frozen to a `gdk_paintable_get_current_image` still on switch-away. Verified capturing the embedded Ghostty GL surface (`docs/images/sidebar-snapshots.png`). |
 | **Workspace overview** — Exposé-style `LazyVGrid` of every tab in a workspace with live snapshots, hover-zoom, and click-to-select; adaptive column count (`WorkspaceOverviewView.swift`). | **REAL** (`buildOverview`/`toggleOverview`, `app/main.swift`) | A `GtkOverlay` + `GtkFlowBox` of workspace tiles (header grid button or Ctrl+O), reusing each workspace's current paintable; `child-activated` switches workspace. Verified headless (`docs/images/overview.png`). insanitty's grid is over workspaces; Fantastty's is over a workspace's tabs. |
-| **Browser tabs** — real WebKit view with navigation + persisted URL. | **DEMO → building real** | Add an address bar + `webkit_web_view_load_uri` + back/forward to the existing WebKitGTK view. |
+| **Browser tabs** — real WebKit view with navigation + persisted URL. | **REAL** (`newBrowserTabInCurrentWorkspace`) | Nav bar (back/forward/reload) + address entry (`normalizeURL` → load or search) + live title/URL sync over a real WebKitWebView. Loads live pages over the network (`docs/images/e2e-6-browser.png`). URL persistence pending layout.json. |
 
 ## tmux integration
 

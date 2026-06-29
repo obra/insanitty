@@ -240,19 +240,80 @@ func toggleOverview() {
     gtk_widget_set_visible(P(bg), 1)
 }
 
-/// New WebKitGTK browser tab in the current workspace (Fantastty has browser tabs).
+/// Turn what the user typed into the address bar into a URL: pass through anything with a
+/// scheme, prefix a bare host with https://, otherwise search.
+func normalizeURL(_ text: String) -> String {
+    let t = text.trimmingCharacters(in: .whitespaces)
+    if t.isEmpty { return "about:blank" }
+    if t.contains("://") || t.hasPrefix("data:") || t.hasPrefix("about:") || t.hasPrefix("file:") { return t }
+    if t.contains(".") && !t.contains(" ") { return "https://" + t }
+    let q = t.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? t
+    return "https://duckduckgo.com/?q=\(q)"
+}
+
+// Browser nav callbacks. The WebKitWebView is passed as the signal's user_data.
+let browserBackCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, ud in
+    if let ud = ud { webkit_web_view_go_back(P(OpaquePointer(ud))) }
+}
+let browserFwdCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, ud in
+    if let ud = ud { webkit_web_view_go_forward(P(OpaquePointer(ud))) }
+}
+let browserReloadCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, ud in
+    if let ud = ud { webkit_web_view_reload(P(OpaquePointer(ud))) }
+}
+/// Address-bar Enter: load what was typed into the web view (user_data).
+let browserGoCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { entry, ud in
+    guard let entry = entry, let ud = ud, let c = gtk_editable_get_text(P(entry)) else { return }
+    webkit_web_view_load_uri(P(OpaquePointer(ud)), normalizeURL(String(cString: c)))
+}
+/// notify::title → keep the tab title (user_data = AdwTabPage) in sync with the page.
+let browserTitleCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { web, _, ud in
+    guard let web = web, let ud = ud, let t = webkit_web_view_get_title(P(web)) else { return }
+    adw_tab_page_set_title(P(OpaquePointer(ud)), t)
+}
+/// notify::uri → reflect the current URL back into the address bar (user_data = GtkEntry).
+let browserUriCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { web, _, ud in
+    guard let web = web, let ud = ud, let u = webkit_web_view_get_uri(P(web)) else { return }
+    gtk_editable_set_text(P(OpaquePointer(ud)), u)
+}
+
+/// New WebKitGTK browser tab in the current workspace: a nav bar (back/forward/reload +
+/// address entry) over a real WebKitWebView. Fantastty has browser tabs alongside terminals.
 func newBrowserTabInCurrentWorkspace() {
     guard let tabView = currentTabView() else { return }
-    let web = OP(webkit_web_view_new())
+    let web = OP(webkit_web_view_new())!
     gtk_widget_set_hexpand(P(web), 1)
     gtk_widget_set_vexpand(P(web), 1)
-    let html = "<html><body style='background:#1e1e2e;color:#cdd6f4;font-family:sans-serif;"
-        + "padding:48px'><h1>insanitty browser</h1><p>A WebKitGTK browser tab, embedded "
-        + "alongside terminal tabs.</p><p>INSANITTY-BROWSER-OK</p></body></html>"
-    webkit_web_view_load_html(P(web), html, nil)
-    let tabPage = OP(adw_tab_view_append(P(tabView), P(web)))
+
+    let bar = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6))!
+    gtk_widget_set_margin_top(P(bar), 4); gtk_widget_set_margin_bottom(P(bar), 4)
+    gtk_widget_set_margin_start(P(bar), 6); gtk_widget_set_margin_end(P(bar), 6)
+    let back = OP(gtk_button_new_from_icon_name("go-previous-symbolic"))!
+    let fwd = OP(gtk_button_new_from_icon_name("go-next-symbolic"))!
+    let reload = OP(gtk_button_new_from_icon_name("view-refresh-symbolic"))!
+    let entry = OP(gtk_entry_new())!
+    gtk_widget_set_hexpand(P(entry), 1)
+    gtk_entry_set_placeholder_text(P(entry), "Search or enter address")
+    g_signal_connect_data(raw(back), "clicked", unsafeBitCast(browserBackCb, to: GCallback.self), raw(web), nil, GConnectFlags(rawValue: 0))
+    g_signal_connect_data(raw(fwd), "clicked", unsafeBitCast(browserFwdCb, to: GCallback.self), raw(web), nil, GConnectFlags(rawValue: 0))
+    g_signal_connect_data(raw(reload), "clicked", unsafeBitCast(browserReloadCb, to: GCallback.self), raw(web), nil, GConnectFlags(rawValue: 0))
+    g_signal_connect_data(raw(entry), "activate", unsafeBitCast(browserGoCb, to: GCallback.self), raw(web), nil, GConnectFlags(rawValue: 0))
+    for b in [back, fwd, reload, entry] { gtk_box_append(P(bar), P(b)) }
+
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
+    gtk_box_append(P(vbox), P(bar))
+    gtk_box_append(P(vbox), P(web))
+
+    let initial = "https://duckduckgo.com"
+    gtk_editable_set_text(P(entry), initial)
+    webkit_web_view_load_uri(P(web), initial)
+    FileHandle.standardError.write(Data("insanitty: browser tab opened (\(initial))\n".utf8))
+
+    let tabPage = OP(adw_tab_view_append(P(tabView), P(vbox)))
     adw_tab_page_set_title(P(tabPage), "Browser")
     adw_tab_view_set_selected_page(P(tabView), P(tabPage))
+    g_signal_connect_data(raw(web), "notify::title", unsafeBitCast(browserTitleCb, to: GCallback.self), raw(tabPage), nil, GConnectFlags(rawValue: 0))
+    g_signal_connect_data(raw(web), "notify::uri", unsafeBitCast(browserUriCb, to: GCallback.self), raw(entry), nil, GConnectFlags(rawValue: 0))
 }
 
 /// One workspace page: a tab bar over an AdwTabView of terminal tabs. The first tab is
