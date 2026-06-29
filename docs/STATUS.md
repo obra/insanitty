@@ -2,6 +2,23 @@
 
 What is actually built and verified, vs. what's pending. Updated as Phase 0 progresses.
 
+## Native QUIC transport + packaging (2026-06-29)
+
+- **Native Swift QUIC client** (`tools/quic-client`, `scripts/e2e-native-quic.sh` PASS): built
+  **msquic** from source and bound it from Swift. The client attaches to the remote-engine helper
+  over QUIC (ALPN `fantastty-remote-engine-v1`), sends the `{session,key}` attach, reads the
+  reliable stream, and decodes a `paneKeyframe` with `RemoteGridProtocol` — the native transport,
+  no subprocess bridge. (Remaining: SPKI cert-pin in the cert-received callback; datagram deltas.)
+- **Installable `.deb`** (`scripts/build-deb.sh`): packages the app + bundled `libghostty-gtk` +
+  Ghostty resources + the remote helper + shell integration + a launcher + `.desktop` into
+  `dist/insanitty_*.deb`. Verified: `sudo dpkg -i` installs it and `/usr/bin/insanitty` runs the
+  embedded engine from the bundled lib/resources.
+- **Automatic builds** (`.github/workflows/deb.yml`): on push/tag, sets up the toolchain
+  (zig 0.15.2, swift, blueprint-compiler, go), builds the forked Ghostty + helper + app, produces
+  the `.deb`, and uploads it as an artifact.
+- Shell integration ported (`scripts/shell-integration/insanitty.sh`); Linear URL parser ported
+  (`InsanittyCore/LinearURL.swift`, tested). `swift test`: 16 tests.
+
 ## Running app + end-to-end test (2026-06-29)
 
 **insanitty runs as a real local terminal workspace manager and passes an end-to-end

@@ -1,0 +1,74 @@
+name: build-deb
+# Automatic Linux build producing an installable .deb on every push/tag (and on demand).
+on:
+  push:
+    branches: [main, linux-port]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  GHOSTTY_REF: 5d0a82ba337368f5632ffa6ce4d7c558fa2de9ff
+  ZIG_VERSION: 0.15.2
+  BLUEPRINT_VERSION: 0.20.4
+
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config git curl xvfb gettext meson ninja-build dpkg-dev \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev
+
+      - name: blueprint-compiler ${{ env.BLUEPRINT_VERSION }} (from source; apt's is too old)
+        run: |
+          git clone --depth 1 -b "v${BLUEPRINT_VERSION}" https://gitlab.gnome.org/jwestman/blueprint-compiler.git /tmp/bp
+          meson setup /tmp/bp/_build /tmp/bp --prefix "$HOME/.local"
+          ninja -C /tmp/bp/_build install
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Zig ${{ env.ZIG_VERSION }}
+        run: |
+          curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          mkdir -p "$HOME/.local/zig" && tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
+          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
+
+      - name: Swift (swiftly)
+        run: |
+          curl -fsSL -o /tmp/swiftly.tar.gz "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz"
+          mkdir -p /tmp/sb && tar -xf /tmp/swiftly.tar.gz -C /tmp/sb
+          SWIFTLY_HOME_DIR="$HOME/.local/swiftly" SWIFTLY_BIN_DIR="$HOME/.local/bin" \
+            /tmp/sb/swiftly init --assume-yes --skip-install --quiet-shell-followup
+          "$HOME/.local/bin/swiftly" install latest --assume-yes
+          echo "$(dirname "$(find "$HOME/.local/share/swiftly/toolchains" -name swiftc | head -1)")" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25" }
+
+      - name: Build forked Ghostty (libghostty-vt + GTK embedding lib + resources)
+        run: |
+          git clone --filter=blob:none https://github.com/ghostty-org/ghostty.git "$RUNNER_TEMP/ghostty"
+          git -C "$RUNNER_TEMP/ghostty" checkout "$GHOSTTY_REF"
+          git -C "$RUNNER_TEMP/ghostty" apply "$GITHUB_WORKSPACE/patches/ghostty-gtk-embed.patch"
+          ( cd "$RUNNER_TEMP/ghostty" && zig build -Demit-lib-vt=true -Doptimize=ReleaseFast )
+          ( cd "$RUNNER_TEMP/ghostty" && zig build -Doptimize=Debug -Dgtk-x11=true -Dgtk-wayland=false -Dapp-runtime=gtk -Dinsanitty-lib=true )
+
+      - name: Build remote-engine helper
+        run: |
+          export GHOSTTY="$RUNNER_TEMP/ghostty" PKG_CONFIG_PATH="$RUNNER_TEMP/ghostty/zig-out/share/pkgconfig" CGO_ENABLED=1
+          mkdir -p build
+          ( cd inspo/fantastty/tools/remote-engine-helper/helper && GOFLAGS=-mod=mod go build -tags ghostty_vt -o "$GITHUB_WORKSPACE/build/fantastty-helper" . ) || true
+
+      - name: Build app + .deb
+        run: |
+          export GHOSTTY="$RUNNER_TEMP/ghostty"
+          ./scripts/build-deb.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: insanitty-deb
+          path: dist/*.deb

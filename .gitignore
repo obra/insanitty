@@ -1,5 +1,7 @@
 inspo/
 .build/
+build/
+dist/
 zig-out/
 .zig-cache/
 vendor/ghostty/zig-out/

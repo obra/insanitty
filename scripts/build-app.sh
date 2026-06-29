@@ -10,6 +10,7 @@ SWIFTC="${SWIFTC:-$(ls -d "$HOME"/.local/share/swiftly/toolchains/*/usr/bin/swif
 GHOSTTY="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
 LIBDIR="$GHOSTTY/zig-out/lib"
 INCDIR="$GHOSTTY/zig-out/include"
+RPATH="${RPATH:-$LIBDIR}"   # packaging overrides this to the install lib dir
 
 [ -x "$SWIFTC" ] || { echo "swiftc not found (set SWIFTC)"; exit 1; }
 [ -f "$LIBDIR/libghostty-gtk.so" ] || { echo "libghostty-gtk.so not found in $LIBDIR — run scripts/build-ghostty.sh"; exit 1; }
@@ -22,6 +23,6 @@ echo "Compiling insanitty (swiftc $($SWIFTC --version 2>/dev/null | head -1))...
   Sources/InsanittyCore/*.swift app/*.swift \
   -L "$LIBDIR" -lghostty-gtk \
   $(pkg-config --libs libadwaita-1 webkitgtk-6.0 | tr ' ' '\n' | grep -E '^-[lL]' | tr '\n' ' ') \
-  -Xlinker -rpath -Xlinker "$LIBDIR" \
+  -Xlinker -rpath -Xlinker "$RPATH" \
   -o build/insanitty
 echo "Built build/insanitty"

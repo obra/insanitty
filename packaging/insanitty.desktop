@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=insanitty
+GenericName=Terminal Workspace Manager
+Comment=Persistent tmux-backed terminal workspaces with tabs, splits, and a remote engine
+Exec=insanitty
+Icon=insanitty
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;Utility;
+Keywords=terminal;tmux;ghostty;workspace;
+StartupNotify=true
