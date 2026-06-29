@@ -11,6 +11,7 @@ nonisolated(unsafe) var gAttach: [UInt8] = []
 nonisolated(unsafe) var gAttachBuf = QUIC_BUFFER()
 nonisolated(unsafe) var gReceived = Data()
 nonisolated(unsafe) var gResult: String?
+nonisolated(unsafe) var gExpectedPin: String?   // SPKI-SHA256 cert pin (from the bootstrap line)
 let gLock = NSLock()
 let gSem = DispatchSemaphore(value: 0)
 
@@ -56,6 +57,19 @@ let connCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?, UnsafeMuta
             gAttachBuf.Buffer = bp.baseAddress
             _ = gApi.pointee.StreamSend(stream, &gAttachBuf, 1, QUIC_SEND_FLAG_NONE, nil)
         }
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED:
+        // Validate the SPKI cert pin ourselves (the cert is self-signed, so msquic's own chain
+        // validation is off): hex(SHA256(SubjectPublicKeyInfo)) must equal the pin from the
+        // bootstrap line. Reject the connection on mismatch.
+        guard let expected = gExpectedPin else { return 0 }  // raw-arg mode: no pin → accept
+        guard let buf = ins_cert_buffer(ev), let der = buf.pointee.Buffer else {
+            FileHandle.standardError.write(Data("PIN-FAIL: no peer certificate\n".utf8)); return 1
+        }
+        var out = [CChar](repeating: 0, count: 65)
+        let got = ins_spki_sha256_hex(der, Int(buf.pointee.Length), &out) == 0 ? String(cString: out) : ""
+        if got.lowercased() == expected.lowercased() { return 0 }  // pin matches → accept
+        FileHandle.standardError.write(Data("PIN-FAIL: SPKI SHA256 = \(got), want \(expected)\n".utf8))
+        return 1  // non-zero status → abort the connection
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
         gSem.signal()
     default: break
@@ -76,6 +90,7 @@ if args.count == 2, args[1] == "--bootstrap" {
         FileHandle.standardError.write(Data("quic-client: could not parse FANTASTTY_REMOTE bootstrap line from stdin\n".utf8)); exit(2)
     }
     host = boot.host; port = boot.port; session = boot.session; key = boot.key
+    gExpectedPin = boot.certSHA256   // enable SPKI cert pinning
 } else if args.count == 5, let p = UInt16(args[2]) {
     host = args[1]; port = p; session = args[3]; key = args[4]
 } else {
@@ -99,7 +114,14 @@ alpn.withUnsafeBufferPointer { ap in
 
 var cred = QUIC_CREDENTIAL_CONFIG()
 cred.Type = QUIC_CREDENTIAL_TYPE_NONE
-cred.Flags = QUIC_CREDENTIAL_FLAGS(rawValue: QUIC_CREDENTIAL_FLAG_CLIENT.rawValue | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION.rawValue)
+// Self-signed remote cert: skip msquic's chain validation, but when a pin is set, receive the
+// peer cert (portable DER) so connCb can pin its SPKI-SHA256 itself.
+var credFlags = QUIC_CREDENTIAL_FLAG_CLIENT.rawValue | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION.rawValue
+if gExpectedPin != nil {
+    credFlags |= QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED.rawValue
+        | QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES.rawValue
+}
+cred.Flags = QUIC_CREDENTIAL_FLAGS(rawValue: credFlags)
 _ = gApi.pointee.ConfigurationLoadCredential(config, &cred)
 
 var conn: OpaquePointer?
