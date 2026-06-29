@@ -11,6 +11,9 @@ import Glibc
 
 final class TmuxControlClient {
     let session: String
+    /// When set, the control session is reached over SSH (`ssh -t [-p port] target tmux -CC …`).
+    var sshTarget: String?
+    var sshPort: Int?
     private(set) var masterFD: Int32 = -1
     private var pid: pid_t = 0
     private var partial: [UInt8] = []
@@ -37,7 +40,9 @@ final class TmuxControlClient {
     /// Spawn `tmux -CC attach-session -t <session>` in a PTY and start reading on the main loop.
     @discardableResult
     func start() -> Bool {
-        let args: [String] = ["tmux", "-CC", "attach-session", "-t", session]
+        // ssh -t forces a remote PTY (which tmux -CC requires); local is a plain tmux -CC attach.
+        let args: [String] = sshTarget.map { SSHTarget.controlArgv(target: $0, port: sshPort, session: session) }
+            ?? ["tmux", "-CC", "attach-session", "-t", session]
         var cargv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
         cargv.append(nil)
         defer { for p in cargv where p != nil { free(p) } }

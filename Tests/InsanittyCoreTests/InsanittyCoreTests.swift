@@ -416,3 +416,26 @@ final class WorkspaceMetadataTests: XCTestCase {
         XCTAssertTrue(WorkspaceMetadataStore.load(from: url).isEmpty)
     }
 }
+
+final class SSHTargetTests: XCTestCase {
+    func testParse() {
+        XCTAssertNil(SSHTarget.parse(""))
+        XCTAssertNil(SSHTarget.parse("   "))
+        XCTAssertEqual(SSHTarget.parse("host")?.target, "host")
+        XCTAssertNil(SSHTarget.parse("host")?.port ?? nil)
+        XCTAssertEqual(SSHTarget.parse("user@host")?.target, "user@host")
+        let hp = SSHTarget.parse("host:22")
+        XCTAssertEqual(hp?.target, "host"); XCTAssertEqual(hp?.port, 22)
+        let up = SSHTarget.parse("user@box.com:2222")
+        XCTAssertEqual(up?.target, "user@box.com"); XCTAssertEqual(up?.port, 2222)
+        // Invalid port → ignored, whole string is the target.
+        XCTAssertEqual(SSHTarget.parse("host:nope")?.target, "host:nope")
+    }
+
+    func testControlArgv() {
+        XCTAssertEqual(SSHTarget.controlArgv(target: "user@box", port: 2222, session: "main"),
+                       ["ssh", "-t", "-p", "2222", "user@box", "tmux", "-CC", "attach-session", "-t", "main"])
+        XCTAssertEqual(SSHTarget.controlArgv(target: "box", port: nil, session: "s"),
+                       ["ssh", "-t", "box", "tmux", "-CC", "attach-session", "-t", "s"])
+    }
+}

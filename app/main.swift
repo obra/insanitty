@@ -659,15 +659,35 @@ final class ControlModeWorkspace {
     var windowPanes: [Int: Set<Int>] = [:]
     var paneSurfaces: [Int: OpaquePointer] = [:]
 
-    init(session: String, tabView: OpaquePointer) {
+    let sshTarget: String?
+    let sshPort: Int?
+
+    init(session: String, tabView: OpaquePointer, sshTarget: String? = nil, sshPort: Int? = nil) {
         client = TmuxControlClient(session: session)
+        client.sshTarget = sshTarget
+        client.sshPort = sshPort
         self.tabView = tabView
+        self.sshTarget = sshTarget
+        self.sshPort = sshPort
         client.surfaceForPane = { [unowned self] pane in
             if paneSurfaces[pane] == nil { paneSurfaces[pane] = makePaneSurface() }
             return paneSurfaces[pane]
         }
         client.onLayout = { [unowned self] window, tree in rebuildWindowPanes(window, tree) }
         client.onWindowClose = { [unowned self] window in closeWindowTab(window) }
+    }
+
+    /// Run a tmux query over the same transport (local or `ssh target`) and return stdout.
+    func tmuxQuery(_ args: String) -> String {
+        let prefix = sshTarget.map { "ssh \(sshPort.map { "-p \($0) " } ?? "")\($0) tmux" } ?? "tmux"
+        return shellOutput("\(prefix) \(args)")
+    }
+
+    /// The default pane id (so keystrokes work before the first %output).
+    func loadDefaultPane() {
+        let paneRaw = tmuxQuery("list-panes -t \(client.session) -F '#{pane_id}' | head -1")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if paneRaw.hasPrefix("%") { client.defaultPane = Int(paneRaw.dropFirst()) }
     }
 
     /// A silent pane surface whose keystrokes route to THIS workspace's client (user_data = self).
@@ -737,7 +757,7 @@ final class ControlModeWorkspace {
 
     /// Query existing windows once (after attach) and build a tab per window from its layout.
     func buildExistingWindows() {
-        for line in shellOutput("tmux list-windows -t \(client.session) -F '#{window_id} #{window_layout}'")
+        for line in tmuxQuery("list-windows -t \(client.session) -F '#{window_id} #{window_layout}'")
             .split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 1)
             guard parts.count == 2, parts[0].hasPrefix("@"), let window = Int(parts[0].dropFirst()),
@@ -762,8 +782,10 @@ let ctrlStartCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { ud in
 
 /// A tmux control-mode workspace: insanitty owns `tmux -CC` for `session`, mapping its windows to
 /// tabs and panes to splits (so splits are real tmux panes and the layout persists in tmux).
-func makeControlModeWorkspacePage(session: String, index: Int) -> OpaquePointer? {
-    runDetached("tmux new-session -A -d -s \(session)")
+/// `sshTarget` reaches the session over SSH; `create` (local only) makes the session if absent.
+func makeControlModeWorkspacePage(session: String, index: Int, sshTarget: String? = nil,
+                                  sshPort: Int? = nil, create: Bool = true) -> OpaquePointer? {
+    if create, sshTarget == nil { runDetached("tmux new-session -A -d -s \(session)") }
     let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
     let tabView = OP(adw_tab_view_new())!
     gtk_widget_set_vexpand(P(tabView), 1)
@@ -772,16 +794,108 @@ func makeControlModeWorkspacePage(session: String, index: Int) -> OpaquePointer?
     gtk_box_append(P(vbox), P(tabBar))
     gtk_box_append(P(vbox), P(tabView))
 
-    let ws = ControlModeWorkspace(session: session, tabView: tabView)
+    let ws = ControlModeWorkspace(session: session, tabView: tabView, sshTarget: sshTarget, sshPort: sshPort)
     controlWorkspaces[index] = ws
-    // Query the session's pane id so keystrokes work before the first %output arrives.
-    let paneRaw = shellOutput("tmux list-panes -t \(session) -F '#{pane_id}' | head -1")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    if paneRaw.hasPrefix("%") { ws.client.defaultPane = Int(paneRaw.dropFirst()) }
+    ws.loadDefaultPane()
     ws.buildExistingWindows()
     g_timeout_add(1500, ctrlStartCb, Unmanaged.passUnretained(ws).toOpaque())
     return vbox
 }
+
+/// Attach to an existing tmux session (local, or remote via `target`/`port`) as a new workspace.
+func attachWorkspace(session: String, sshTarget: String? = nil, sshPort: Int? = nil) {
+    guard let list = sidebarList else { return }
+    let idx = workspaceCounter; workspaceCounter += 1
+    guard let page = makeControlModeWorkspacePage(session: session, index: idx, sshTarget: sshTarget, sshPort: sshPort, create: false) else { return }
+    let label = sshTarget.map { "\($0):\(session)" } ?? session
+    let tileIdx = registerWorkspace(page, name: label, id: "attach-\(idx)", index: idx)
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(tileIdx)))))
+}
+
+// MARK: - Attach picker (TmuxAttachSheet)
+
+nonisolated(unsafe) var attachHostEntry: OpaquePointer?
+nonisolated(unsafe) var attachList: OpaquePointer?
+nonisolated(unsafe) var attachWindow: OpaquePointer?
+
+/// The tmux command prefix for the attach picker's current host (local or `ssh …`).
+func attachHostText() -> String {
+    attachHostEntry.flatMap { gtk_editable_get_text(P($0)) }.map { String(cString: $0) } ?? ""
+}
+
+/// (Re)list tmux sessions for the entered host (local if blank) into the picker.
+let attachRefreshCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in
+    guard let list = attachList else { return }
+    while let old = OP(gtk_widget_get_first_child(P(list))) { gtk_list_box_remove(P(list), P(old)) }
+    let ssh = SSHTarget.parse(attachHostText())
+    let prefix = ssh.map { "ssh \($0.port.map { "-p \($0) " } ?? "")\($0.target) tmux" } ?? "tmux"
+    let out = shellOutput("\(prefix) list-sessions -F '#{session_name}:#{session_windows}' 2>/dev/null")
+    var any = false
+    for line in out.split(separator: "\n") {
+        let parts = line.split(separator: ":").map(String.init)
+        guard let name = parts.first, ssh != nil || (!name.hasPrefix("insanitty-ws-") && name != "insanitty-cc") else { continue }
+        any = true
+        let row = OP(adw_action_row_new())
+        adw_preferences_row_set_title(P(row), name)
+        if parts.count > 1 { adw_action_row_set_subtitle(P(row), "\(parts[1]) window(s)") }
+        gtk_list_box_append(P(list), P(row))
+    }
+    if !any {
+        let row = OP(adw_action_row_new()); adw_preferences_row_set_title(P(row), "No sessions found")
+        gtk_list_box_append(P(list), P(row))
+    }
+}
+
+/// Picked a session → attach it as a workspace and close the picker.
+let attachRowCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, rowPtr, _ in
+    guard let row = rowPtr, let cstr = adw_preferences_row_get_title(P(row)) else { return }
+    let name = String(cString: cstr)
+    guard !name.isEmpty, name != "No sessions found" else { return }
+    let ssh = SSHTarget.parse(attachHostText())
+    attachWorkspace(session: name, sshTarget: ssh?.target, sshPort: ssh?.port)
+    if let w = attachWindow { gtk_window_close(P(w)) }
+}
+
+/// Open the attach picker: list local/SSH tmux sessions and attach one as a workspace.
+func openAttach() {
+    let win = OP(adw_window_new())!
+    attachWindow = win
+    gtk_window_set_title(P(win), "Attach to tmux session")
+    if let mw = mainWindow { gtk_window_set_transient_for(P(win), P(mw)); gtk_window_set_modal(P(win), 1) }
+    gtk_window_set_default_size(P(win), 460, 480)
+    let toolbar = OP(adw_toolbar_view_new())
+    adw_toolbar_view_add_top_bar(P(toolbar), P(OP(adw_header_bar_new())))
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8))!
+    for set in [gtk_widget_set_margin_top, gtk_widget_set_margin_bottom, gtk_widget_set_margin_start, gtk_widget_set_margin_end] { set(P(vbox), 8) }
+
+    let hostBox = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6))!
+    let entry = OP(gtk_entry_new())!
+    gtk_widget_set_hexpand(P(entry), 1)
+    gtk_entry_set_placeholder_text(P(entry), "SSH host (user@host:port) — blank for local")
+    attachHostEntry = entry
+    g_signal_connect_data(raw(entry), "activate", unsafeBitCast(attachRefreshCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    let listBtn = OP(gtk_button_new_with_label("List"))!
+    g_signal_connect_data(raw(listBtn), "clicked", unsafeBitCast(attachRefreshCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_box_append(P(hostBox), P(entry)); gtk_box_append(P(hostBox), P(listBtn))
+    gtk_box_append(P(vbox), P(hostBox))
+
+    let scroll = OP(gtk_scrolled_window_new())
+    gtk_widget_set_vexpand(P(scroll), 1)
+    let list = OP(gtk_list_box_new())!
+    gtk_list_box_set_selection_mode(P(list), GTK_SELECTION_NONE)
+    gtk_widget_add_css_class(P(list), "boxed-list")
+    attachList = list
+    g_signal_connect_data(raw(list), "row-activated", unsafeBitCast(attachRowCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_scrolled_window_set_child(P(scroll), P(list))
+    gtk_box_append(P(vbox), P(scroll))
+
+    adw_toolbar_view_set_content(P(toolbar), P(vbox))
+    adw_window_set_content(P(win), P(toolbar))
+    attachRefreshCb(nil, nil)   // initial local list
+    gtk_window_present(P(win))
+}
+
+let attachBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openAttach() }
 
 /// Run a process (optionally feeding stdin) and return its stdout, or nil on failure.
 func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data? {
@@ -1157,6 +1271,16 @@ func buildWindow() {
     }
     gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(selPos)))))
 
+    // Test hook: attach a session on startup (what the attach picker does), e.g.
+    // INSANITTY_ATTACH=name or INSANITTY_ATTACH=user@host:port/name — avoids clicking near live sessions.
+    if let spec = ProcessInfo.processInfo.environment["INSANITTY_ATTACH"], !spec.isEmpty {
+        if let slash = spec.lastIndex(of: "/"), let ssh = SSHTarget.parse(String(spec[..<slash])) {
+            attachWorkspace(session: String(spec[spec.index(after: slash)...]), sshTarget: ssh.target, sshPort: ssh.port)
+        } else {
+            attachWorkspace(session: spec)
+        }
+    }
+
     let content = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0))
     gtk_box_append(P(content), P(sidebarScroll))
     gtk_box_append(P(content), P(OP(gtk_separator_new(GTK_ORIENTATION_VERTICAL))))
@@ -1179,6 +1303,10 @@ func buildWindow() {
     gtk_widget_set_tooltip_text(P(notesBtn), "Workspace notes")
     g_signal_connect_data(raw(notesBtn), "clicked", unsafeBitCast(notesBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
     adw_header_bar_pack_start(P(header), P(notesBtn))
+    let attachBtn = OP(gtk_button_new_from_icon_name("network-server-symbolic"))!
+    gtk_widget_set_tooltip_text(P(attachBtn), "Attach to a tmux session (local or SSH)")
+    g_signal_connect_data(raw(attachBtn), "clicked", unsafeBitCast(attachBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_header_bar_pack_start(P(header), P(attachBtn))
     let settingsBtn = OP(gtk_button_new_from_icon_name("emblem-system-symbolic"))!
     gtk_widget_set_tooltip_text(P(settingsBtn), "Settings")
     g_signal_connect_data(raw(settingsBtn), "clicked", unsafeBitCast(settingsBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
