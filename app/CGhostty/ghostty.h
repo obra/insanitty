@@ -4,6 +4,12 @@
 #include <adwaita.h>
 #include <webkit/webkit.h>
 #include <insanitty.h>
+#include <stdbool.h>
+
+/* Register a host callback for custom OSC 9 payloads (insanitty:note;/ticket;/pr;). The embedding
+ * lib offers each notification body here; returning true marks it consumed (no desktop notification).
+ * Exported from vendor/ghostty/src/insanitty_osc.zig. */
+void insanitty_set_osc_handler(bool (*handler)(const unsigned char *body, size_t len));
 
 /* GObject signal connect that performs the G_CALLBACK cast Swift can't express.
  * static inline so the app links it without a separate translation unit. */

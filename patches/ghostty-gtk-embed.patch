@@ -82,7 +82,7 @@ index c467f1801..cbf681cbf 100644
  };
  
 diff --git a/src/apprt/gtk/class/application.zig b/src/apprt/gtk/class/application.zig
-index a627086eb..8ede1cc3d 100644
+index a627086eb..947028ad2 100644
 --- a/src/apprt/gtk/class/application.zig
 +++ b/src/apprt/gtk/class/application.zig
 @@ -526,7 +526,10 @@ pub const Application = extern struct {
@@ -97,6 +97,17 @@ index a627086eb..8ede1cc3d 100644
          }
  
          // If we are NOT the primary instance, then we never want to run.
+@@ -1959,6 +1962,10 @@ const Action = struct {
+         target: apprt.Target,
+         n: apprt.action.DesktopNotification,
+     ) void {
++        // insanitty: OSC 9 bodies prefixed `insanitty:` are note/ticket/pr signals, not
++        // desktop notifications — offer the body to the host first; if consumed, don't notify.
++        if (@import("../../../insanitty_osc.zig").handle(n.body)) return;
++
+         switch (target) {
+             .app => {},
+             .surface => |v| {
 diff --git a/src/build/SharedDeps.zig b/src/build/SharedDeps.zig
 index b68be92d0..8342687b4 100644
 --- a/src/build/SharedDeps.zig
@@ -114,10 +125,10 @@ index b68be92d0..8342687b4 100644
          step.addCSourceFile(.{
 diff --git a/src/insanitty_c_api.zig b/src/insanitty_c_api.zig
 new file mode 100644
-index 000000000..1040cc446
+index 000000000..db5174ff4
 --- /dev/null
 +++ b/src/insanitty_c_api.zig
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,75 @@
 +//! Minimal C ABI to embed the Ghostty GTK terminal surface into a host GTK4
 +//! application (insanitty). The host owns its window/chrome; this TU owns the
 +//! libghostty App, the GhosttyApplication singleton, and the integrated run loop.
@@ -137,6 +148,11 @@ index 000000000..1040cc446
 +
 +var core_app: *CoreApp = undefined;
 +var rt_app: apprt.App = undefined;
++
++// Ensure the OSC-handler hook (and its export) is compiled into the embedding lib.
++comptime {
++    _ = @import("insanitty_osc.zig");
++}
 +
 +/// Stand up global state, the core app, and the GhosttyApplication, and register
 +/// it so Application.default() works and compiled-in resources resolve. Returns
@@ -187,4 +203,26 @@ index 000000000..1040cc446
 +/// Begin app shutdown from the host.
 +export fn insanitty_app_quit() void {
 +    rt_app.app.quit();
++}
+diff --git a/src/insanitty_osc.zig b/src/insanitty_osc.zig
+new file mode 100644
+index 000000000..44984c28f
+--- /dev/null
++++ b/src/insanitty_osc.zig
+@@ -0,0 +1,16 @@
++//! Host hook for custom OSC 9 payloads. insanitty's shell integration emits OSC 9 sequences whose
++//! body is prefixed `insanitty:` (note/ticket/pr signals) rather than a real desktop notification.
++//! The GTK apprt's desktop-notification path offers each body here first; if the host consumes it
++//! (returns true), ghostty does NOT show it as a notification.
++var osc_handler: ?*const fn ([*]const u8, usize) callconv(.c) bool = null;
++
++/// Register the host callback (insanitty). Pass null to clear.
++pub export fn insanitty_set_osc_handler(handler: ?*const fn ([*]const u8, usize) callconv(.c) bool) void {
++    osc_handler = handler;
++}
++
++/// Offer a notification body to the host. Returns true if the host consumed it.
++pub fn handle(body: []const u8) bool {
++    if (osc_handler) |h| return h(body.ptr, body.len);
++    return false;
 +}

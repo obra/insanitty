@@ -53,6 +53,30 @@ func metaFor(_ id: String) -> WorkspaceMetadata {
     return m
 }
 
+/// Consume `insanitty:` OSC 9 payloads (note/ticket/pr) from the shell integration onto the current
+/// workspace's metadata. Returns true if consumed (ghostty then skips the desktop notification).
+/// Invoked by the embedding lib on the GTK main thread.
+let oscHandlerCb: @convention(c) (UnsafePointer<UInt8>?, Int) -> Bool = { ptr, len in
+    guard let ptr = ptr, len > 0 else { return false }
+    let body = String(decoding: UnsafeBufferPointer(start: ptr, count: len), as: UTF8.self)
+    guard body.hasPrefix("insanitty:") else { return false }
+    let id = currentWorkspaceID() ?? "insanitty-ws-0"
+    var m = metaFor(id)
+    if body.hasPrefix("insanitty:note;") {
+        m.appendNote(content: String(body.dropFirst("insanitty:note;".count)), source: .terminal, at: Date())
+    } else if body.hasPrefix("insanitty:ticket;") {
+        m.ticketURL = String(body.dropFirst("insanitty:ticket;".count)); m.modifiedAt = Date()
+    } else if body.hasPrefix("insanitty:pr;") {
+        m.pullRequestURL = String(body.dropFirst("insanitty:pr;".count)); m.modifiedAt = Date()
+    } else {
+        return false
+    }
+    workspaceMeta[id] = m; saveWorkspaceMeta()
+    if notesWorkspaceID == id { rebuildNotesList() }   // live-refresh the notes panel if open
+    FileHandle.standardError.write(Data("insanitty: consumed OSC \(body.prefix(48))\n".utf8))
+    return true
+}
+
 nonisolated(unsafe) var lastActiveTick = Date()
 
 /// Accumulate focused time onto the active workspace (idle-excluded: only counts while the window
@@ -1200,6 +1224,7 @@ guard let a = insanitty_app_init() else {
     FileHandle.standardError.write(Data("insanitty: app_init failed\n".utf8)); exit(1)
 }
 gapp = OP(a)
+insanitty_set_osc_handler(oscHandlerCb)
 applyAppearance(currentSettings.appearance)
 buildWindow()
 
