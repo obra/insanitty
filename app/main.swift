@@ -652,8 +652,13 @@ func injectRemoteGrid() {
     Thread.detachNewThread {
         let helper = FileManager.default.isExecutableFile(atPath: "build/fantastty-helper")
             ? "build/fantastty-helper" : "/tmp/fantastty-helper"
-        guard let bootData = runProcess(helper,
-                ["launch-or-resume", "insanitty-remote-gui", "--ttl", "8h", "--key-ttl", "30s"]),
+        // Opt in to a tmux-backed remote workspace (multi-pane + live input) by pointing at an
+        // existing tmux session; otherwise the helper serves its default single-pane shell source.
+        var launchArgs = ["launch-or-resume", "insanitty-remote-gui", "--ttl", "8h", "--key-ttl", "30s"]
+        if let tmux = ProcessInfo.processInfo.environment["INSANITTY_REMOTE_TMUX"], !tmux.isEmpty {
+            launchArgs += ["--tmux-session", tmux]
+        }
+        guard let bootData = runProcess(helper, launchArgs),
               let line = String(decoding: bootData, as: UTF8.self).split(separator: "\n")
                 .map(String.init).first(where: { $0.hasPrefix("FANTASTTY_REMOTE ") }),
               let boot = try? RemoteBootstrapLine.parse(line) else {

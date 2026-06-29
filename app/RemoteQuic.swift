@@ -24,6 +24,7 @@ final class RemoteQuicFetcher {
     var inputPane = 0
     private var sendKeysBytes: [UInt8] = []; private var sendKeysBuf = QUIC_BUFFER()
     private var reqKfBytes: [UInt8] = [];    private var reqKfBuf = QUIC_BUFFER()
+    private var stream: OpaquePointer?       // the attach stream, kept to request a keyframe later
     let sem = DispatchSemaphore(value: 0)
     let lock = NSLock()
 
@@ -64,9 +65,14 @@ final class RemoteQuicFetcher {
         _ = api.pointee.ConnectionOpen(reg, remoteConnCb, ctx, &conn)
         _ = host.withCString { hp in api.pointee.ConnectionStart(conn, config, UInt16(0), hp, port) }
         _ = sem.wait(timeout: .now() + 8)
-        // If we forwarded keystrokes, the echoed result comes back as a fresh keyframe after the
-        // remote applies them — let it round-trip and overwrite keyframes[pane] before we close.
-        if !inputBytes.isEmpty { usleep(2_500_000) }
+        // If we forwarded keystrokes, let the remote shell process them, then request a full
+        // keyframe (the echoed output is now in the captured grid) and let it round-trip and
+        // overwrite keyframes[pane] before we close.
+        if !inputBytes.isEmpty {
+            usleep(1_500_000)
+            requestFreshKeyframe()
+            usleep(1_500_000)
+        }
         // ConnectionClose blocks until this connection's callbacks have drained, so no callback
         // fires on this fetcher after it's released. (The registration/api are intentionally left
         // open — a small per-fetch leak; closing the registration deadlocks on its worker threads.)
@@ -83,19 +89,24 @@ final class RemoteQuicFetcher {
         return got.lowercased() == expectedPin.lowercased() ? 0 : 1
     }
 
-    /// After attach, forward any queued keystrokes to the active pane, then ask for a fresh keyframe
-    /// so the echoed result comes back on this same connection. The request buffers are instance
-    /// vars so they outlive the async StreamSend.
+    /// After attach, forward any queued keystrokes to the active pane. The request buffer is an
+    /// instance var so it outlives the async StreamSend.
     func sendInputIfNeeded(_ stream: OpaquePointer?) {
         guard !inputBytes.isEmpty else { return }
         FileHandle.standardError.write(Data("insanitty: forwarding \(inputBytes.count) input byte(s) to pane \(inputPane)\n".utf8))
         let b64 = Data(inputBytes).base64EncodedString()
         sendKeysBytes = Array("{\"type\":\"sendKeys\",\"workspaceID\":\"\(workspaceID)\",\"paneID\":\(inputPane),\"data\":\"\(b64)\"}\n".utf8)
-        reqKfBytes = Array("{\"type\":\"requestKeyframe\",\"workspaceID\":\"\(workspaceID)\",\"paneID\":\(inputPane)}\n".utf8)
         sendKeysBytes.withUnsafeMutableBufferPointer { bp in
             sendKeysBuf.Length = UInt32(bp.count); sendKeysBuf.Buffer = bp.baseAddress
             _ = api.pointee.StreamSend(stream, &sendKeysBuf, 1, QUIC_SEND_FLAG_NONE, nil)
         }
+    }
+
+    /// Ask the remote for a full keyframe — called after a delay so the shell has processed the
+    /// forwarded keystrokes and the echoed output is in the captured grid.
+    func requestFreshKeyframe() {
+        guard let stream = stream else { return }
+        reqKfBytes = Array("{\"type\":\"requestKeyframe\",\"workspaceID\":\"\(workspaceID)\",\"paneID\":\(inputPane)}\n".utf8)
         reqKfBytes.withUnsafeMutableBufferPointer { bp in
             reqKfBuf.Length = UInt32(bp.count); reqKfBuf.Buffer = bp.baseAddress
             _ = api.pointee.StreamSend(stream, &reqKfBuf, 1, QUIC_SEND_FLAG_NONE, nil)
@@ -129,6 +140,7 @@ let remoteConnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?, Unsa
         var stream: OpaquePointer?
         _ = f.api.pointee.StreamOpen(conn, QUIC_STREAM_OPEN_FLAG_NONE, remoteStreamCb, ctx, &stream)
         _ = f.api.pointee.StreamStart(stream, QUIC_STREAM_START_FLAG_IMMEDIATE)
+        f.stream = stream
         f.attach.withUnsafeMutableBufferPointer { bp in
             f.attachBuf.Length = UInt32(bp.count); f.attachBuf.Buffer = bp.baseAddress
             _ = f.api.pointee.StreamSend(stream, &f.attachBuf, 1, QUIC_SEND_FLAG_NONE, nil)
