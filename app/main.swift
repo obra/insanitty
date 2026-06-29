@@ -45,6 +45,8 @@ nonisolated(unsafe) var overviewBox: OpaquePointer?   // Exposé overlay (hidden
 nonisolated(unsafe) var overviewFlow: OpaquePointer?  // the GtkFlowBox of workspace tiles
 nonisolated(unsafe) var ctrlClient: TmuxControlClient?   // live tmux -CC client (demo workspace)
 nonisolated(unsafe) var ctrlPaneSurfaces: [Int: OpaquePointer] = [:]  // tmux pane id → surface
+nonisolated(unsafe) var ctrlPaneContainer: OpaquePointer?  // box holding the current pane tree
+nonisolated(unsafe) var ctrlCurrentPanes: Set<Int> = []    // panes currently laid out
 
 /// A live terminal pane that expands to fill its slot. If `command` is given, the surface
 /// runs it instead of the default shell (used for tmux-backed workspaces).
@@ -437,6 +439,65 @@ let ctrlKeyCb: @convention(c) (OpaquePointer?, guint, guint, GdkModifierType, Un
     return 1
 }
 
+/// A silent control-mode pane surface (renders only injected output) with a key controller that
+/// forwards keystrokes to the active pane. Ref-sunk so it survives re-parenting across relayouts.
+func makeControlPaneSurface() -> OpaquePointer? {
+    guard let s = makeSilentTerminal() else { return nil }
+    g_object_ref_sink(raw(s))
+    let kc = OP(gtk_event_controller_key_new())
+    gtk_event_controller_set_propagation_phase(P(kc), GTK_PHASE_CAPTURE)
+    g_signal_connect_data(raw(kc), "key-pressed", unsafeBitCast(ctrlKeyCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_widget_add_controller(P(s), P(kc))
+    return s
+}
+
+/// Build the widget for a tmux pane layout: a leaf → its surface, a split → a (nested) GtkPaned.
+func buildPaneTree(_ node: TmuxLayoutNode) -> OpaquePointer? {
+    switch node {
+    case .leaf(let pane):
+        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = makeControlPaneSurface() }
+        return ctrlPaneSurfaces[pane]
+    case .horizontal(let kids):
+        return buildPaned(GTK_ORIENTATION_HORIZONTAL, kids)
+    case .vertical(let kids):
+        return buildPaned(GTK_ORIENTATION_VERTICAL, kids)
+    }
+}
+
+/// Fold an N-ary tmux split into nested binary GtkPaned widgets.
+func buildPaned(_ orientation: GtkOrientation, _ kids: [TmuxLayoutNode]) -> OpaquePointer? {
+    guard var acc = kids.first.flatMap({ buildPaneTree($0) }) else { return nil }
+    for kid in kids.dropFirst() {
+        let paned = OP(gtk_paned_new(orientation))!
+        gtk_paned_set_resize_start_child(P(paned), 1); gtk_paned_set_resize_end_child(P(paned), 1)
+        gtk_paned_set_start_child(P(paned), P(acc))
+        gtk_paned_set_end_child(P(paned), P(buildPaneTree(kid)))
+        acc = paned
+    }
+    return acc
+}
+
+/// Lay out the control session's panes to match a tmux window layout. Surfaces are reused across
+/// relayouts (kept alive by the dict's ref), so a pane's content persists when the layout changes.
+func rebuildControlPanes(_ tree: TmuxLayoutNode) {
+    guard let container = ctrlPaneContainer else { return }
+    let newPanes = Set(tree.allPanes())
+    if newPanes == ctrlCurrentPanes { return }   // same panes, only sizes changed
+    ctrlCurrentPanes = newPanes
+    // Detach every surface from its parent (the dict keeps them alive), then drop the old tree.
+    for (_, s) in ctrlPaneSurfaces where gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+    while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
+    if let widget = buildPaneTree(tree) { gtk_box_append(P(container), P(widget)) }
+    // Release surfaces for panes that closed.
+    for pane in Array(ctrlPaneSurfaces.keys) where !newPanes.contains(pane) {
+        if let s = ctrlPaneSurfaces.removeValue(forKey: pane) {
+            if gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+            g_object_unref(raw(s))
+        }
+    }
+    FileHandle.standardError.write(Data("tmux-cc: built \(newPanes.count)-pane layout\n".utf8))
+}
+
 /// A "tmux -CC" workspace: insanitty owns the `tmux -CC` control session and renders its pane by
 /// injecting the control protocol's %output into a silent surface (TmuxControlClient). A live
 /// demonstration of tmux control mode; env-gated (INSANITTY_TMUX_CC) so it stays out of the way.
@@ -450,14 +511,10 @@ func makeControlModeWorkspacePage() -> OpaquePointer? {
     gtk_box_append(P(vbox), P(tabBar))
     gtk_box_append(P(vbox), P(tabView))
 
-    let term = makeSilentTerminal()!
-    // Route keystrokes on this surface to tmux (the surface's own shell is a no-op cat).
-    let kc = OP(gtk_event_controller_key_new())
-    gtk_event_controller_set_propagation_phase(P(kc), GTK_PHASE_CAPTURE)
-    g_signal_connect_data(raw(kc), "key-pressed", unsafeBitCast(ctrlKeyCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
-    gtk_widget_add_controller(P(term), P(kc))
+    // A container for the dynamic GtkPaned tree of silent pane surfaces (panes → splits).
     let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
-    gtk_box_append(P(box), P(term))
+    gtk_widget_set_vexpand(P(box), 1)
+    ctrlPaneContainer = box
     let page = OP(adw_tab_view_append(P(tabView), P(box)))!
     adw_tab_page_set_title(P(page), "tmux -CC")
 
@@ -467,11 +524,18 @@ func makeControlModeWorkspacePage() -> OpaquePointer? {
         .trimmingCharacters(in: .whitespacesAndNewlines)
     if paneRaw.hasPrefix("%") { client.defaultPane = Int(paneRaw.dropFirst()) }
     client.surfaceForPane = { pane in
-        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = term }
+        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = makeControlPaneSurface() }
         return ctrlPaneSurfaces[pane]
     }
+    client.onLayout = { _, tree in rebuildControlPanes(tree) }
     ctrlClient = client
-    // Start once the surface has realized; the client then injects tmux output into it.
+
+    // Build the initial pane tree from the current tmux window layout (panes → GtkPaned splits).
+    let layoutStr = shellOutput("tmux list-windows -t insanitty-cc -F '#{window_layout}' | head -1")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let tree = TmuxLayoutParser.parse(layoutStr) { rebuildControlPanes(tree) }
+
+    // Start the control client once the surfaces have realized; it then injects tmux output.
     let startCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
         ctrlClient?.start(); return 0
     }
