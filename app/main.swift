@@ -18,6 +18,7 @@ nonisolated(unsafe) var mainWindow: OpaquePointer?
 nonisolated(unsafe) var mainStack: OpaquePointer?
 nonisolated(unsafe) var remoteSurface: OpaquePointer?
 nonisolated(unsafe) var injectTries = 0
+nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
 nonisolated(unsafe) var surfaces = Set<OpaquePointer>()
 
@@ -105,6 +106,16 @@ func currentTabView() -> OpaquePointer? {
 
 /// New terminal tab in the current workspace.
 func newTabInCurrentWorkspace() { addTab(to: currentTabView()) }
+
+/// Create a new tmux-backed workspace and switch to it.
+func addWorkspace() {
+    guard let stack = mainStack else { return }
+    let idx = workspaceCounter
+    workspaceCounter += 1
+    let page = makeWorkspacePage(index: idx)
+    gtk_stack_add_titled(P(stack), P(page), "ws\(idx)", WorkspaceName.generate())
+    gtk_stack_set_visible_child(P(stack), P(page))
+}
 
 /// New WebKitGTK browser tab in the current workspace (Fantastty has browser tabs).
 func newBrowserTabInCurrentWorkspace() {
@@ -228,6 +239,10 @@ func buildWindow() {
         }
         if ctrl && (keyval == GDK_KEY_b || keyval == GDK_KEY_B) {
             newBrowserTabInCurrentWorkspace()
+            return 1
+        }
+        if ctrl && (keyval == GDK_KEY_n || keyval == GDK_KEY_N) {
+            addWorkspace()
             return 1
         }
         return 0
