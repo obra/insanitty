@@ -92,3 +92,5 @@ jobs:
           ./scripts/e2e-scenario.sh
           ./scripts/e2e-layout-persistence.sh
           ./scripts/e2e-remote-multipane.sh
+          ./scripts/e2e-remote-gui.sh
+          ./scripts/e2e-remote-live.sh
