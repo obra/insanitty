@@ -32,7 +32,7 @@ DISPLAY=:123 XDG_CONFIG_HOME=/tmp/inscfg GHOSTTY_RESOURCES_DIR="$GS/zig-out/shar
 sleep 5
 # Select the remote (QUIC) workspace (4th sidebar row) and wait for the initial paint.
 DISPLAY=:123 xdotool mousemove 110 590 click 1
-sleep 6
+sleep 13   # the default (non-tmux) workspace's helper renderer can take several seconds to launch
 grep -q 'rendered .* remote workspace (native QUIC)' "$LOG" || { echo "REMOTE-INPUT E2E FAIL: remote workspace never painted"; tail -3 "$LOG"; exit 1; }
 # Focus the remote pane and type a command (17 visible chars + Enter = 18 bytes).
 DISPLAY=:123 xdotool mousemove 650 350 click 1; sleep 1
