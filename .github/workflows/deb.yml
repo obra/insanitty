@@ -66,9 +66,7 @@ jobs:
       - name: Build msquic (in-process QUIC for the remote workspace)
         run: |
           sudo apt-get install -y cmake ninja-build
-          git clone --recursive --depth 1 -b v2.4.10 https://github.com/microsoft/msquic.git "$RUNNER_TEMP/msquic"
-          cmake -S "$RUNNER_TEMP/msquic" -B "$RUNNER_TEMP/msquic/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/msquic/build"
+          MSQUIC_SRC="$RUNNER_TEMP/msquic" ./scripts/build-msquic.sh
 
       - name: Build app + .deb
         run: |
