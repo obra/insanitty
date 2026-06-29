@@ -35,4 +35,6 @@ grep -q 'tmux-cc: built 2-pane layout' /tmp/app-ccs.log \
   || { echo "TMUX-CC-SPLIT E2E FAIL: insanitty did not build a 2-pane layout from the tmux window"; exit 1; }
 grep -q 'tmux-cc: attached' /tmp/app-ccs.log \
   || { echo "TMUX-CC-SPLIT E2E FAIL: control client did not attach"; exit 1; }
-echo "TMUX-CC-SPLIT E2E PASS: insanitty mapped a 2-pane tmux window onto a GtkPaned split ($SHOT)"
+grep -q 'tmux-cc: rendered' /tmp/app-ccs.log \
+  || { echo "TMUX-CC-SPLIT E2E FAIL: no pane content rendered"; exit 1; }
+echo "TMUX-CC-SPLIT E2E PASS: insanitty mapped a 2-pane tmux window onto a GtkPaned split + rendered both panes ($SHOT)"

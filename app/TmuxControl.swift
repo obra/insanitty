@@ -21,6 +21,9 @@ final class TmuxControlClient {
     var defaultPane: Int?
     /// The pane to route keystrokes to right now.
     var inputPane: Int? { activePane ?? defaultPane }
+    /// The window size (cells) reported to tmux via refresh-client, so panes match the surfaces.
+    var sizeCols = 110
+    var sizeRows = 38
 
     /// Look up or create the surface a pane's output should be injected into (main thread).
     var surfaceForPane: ((_ pane: Int) -> OpaquePointer?)?
@@ -44,6 +47,9 @@ final class TmuxControlClient {
         }
         let retained = Unmanaged.passRetained(self).toOpaque()
         g_unix_fd_add(masterFD, G_IO_IN, tmuxFDReadable, retained)
+        // Tell tmux this control client's size so it sizes the window/panes to match the surfaces
+        // (a detached session is tiny, and a -CC client's pty size doesn't drive the window).
+        send("refresh-client -C \(sizeCols)x\(sizeRows)")
         FileHandle.standardError.write(Data("tmux-cc: attached \(session) (fd \(masterFD))\n".utf8))
         return true
     }

@@ -536,7 +536,15 @@ func makeControlModeWorkspacePage() -> OpaquePointer? {
     if let tree = TmuxLayoutParser.parse(layoutStr) { rebuildControlPanes(tree) }
 
     // Start the control client once the surfaces have realized; it then injects tmux output.
+    // Estimate the window's cell size from the realized container so tmux sizes panes to match.
     let startCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
+        if let c = ctrlPaneContainer {
+            let w = Int(gtk_widget_get_width(P(c))), h = Int(gtk_widget_get_height(P(c)))
+            if w > 0, h > 0 {
+                ctrlClient?.sizeCols = max(40, min(400, w / 8))   // ~8px per cell column
+                ctrlClient?.sizeRows = max(10, min(200, h / 17))  // ~17px per cell row
+            }
+        }
         ctrlClient?.start(); return 0
     }
     g_timeout_add(1500, startCb, nil)
