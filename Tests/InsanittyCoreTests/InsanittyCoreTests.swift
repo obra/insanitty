@@ -276,3 +276,31 @@ final class TmuxLayoutParserTests: XCTestCase {
         XCTAssertNil(TmuxLayoutParser.parse("bf5d,80x24,0,0{40x24,0,0,1"))  // unclosed brace
     }
 }
+
+final class RemoteGridRendererTests: XCTestCase {
+    func testSGRForStyles() {
+        let bold = CellStyle(foreground: .indexed(4), background: .default, underlineColor: .default,
+                             bold: true, faint: false, italic: false, blink: false, inverse: false,
+                             invisible: false, strikethrough: false, underline: .none)
+        XCTAssertEqual(RemoteGridRenderer.sgr(for: bold), "\u{1b}[0;1;38;5;4;49m")
+        XCTAssertEqual(RemoteGridRenderer.sgr(for: .normal), "\u{1b}[0;39;49m")
+        let rgb = CellStyle(foreground: .rgb(red: 10, green: 20, blue: 30), background: .indexed(2),
+                            underlineColor: .default, bold: false, faint: false, italic: true,
+                            blink: false, inverse: false, invisible: false, strikethrough: false, underline: .none)
+        XCTAssertEqual(RemoteGridRenderer.sgr(for: rgb), "\u{1b}[0;3;38;2;10;20;30;48;5;2m")
+    }
+
+    func testRendersFixtureKeyframe() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/remote-grid-payload.jsonl")
+        let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map(String.init)
+        guard case let .paneKeyframe(kf) = try RemoteGridProtocol.decode(line: lines[1]) else {
+            return XCTFail("expected a paneKeyframe")
+        }
+        let ansi = RemoteGridRenderer.ansi(for: kf)
+        XCTAssertTrue(ansi.hasPrefix("\u{1b}[2J\u{1b}[H"), "should clear + home")
+        XCTAssertTrue(ansi.contains("\u{1b}[1;1H"), "should position the first row")
+        XCTAssertTrue(ansi.contains("\u{1b}[24;1H"), "should position the 24th row")
+        XCTAssertTrue(ansi.contains("\u{1b}[\(kf.cursor.row + 1);\(kf.cursor.column + 1)H"), "cursor")
+    }
+}

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# E2E: insanitty renders a REMOTE (QUIC) workspace inside its GUI. The app fetches a pane
-# grid from the remote-engine helper over QUIC (scripts/remote-grid-ansi.sh) and injects it
-# into an inert surface via insanitty_surface_inject_output. Headless: Xvfb + WM + dbus.
+# E2E: insanitty renders a REMOTE (QUIC) workspace inside its GUI. The app drives its own remote
+# stack — launch-or-resume the helper for a bootstrap line, then the SPKI-pinned native Swift QUIC
+# client (tools/quic-client) attaches over QUIC and renders the grid — and injects it into a
+# surface via insanitty_surface_inject_output. No bash/Python bridge. Headless: Xvfb + WM + dbus.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
 SHOT="${OUT:-docs/images}/e2e-7-remote-in-gui.png"
 [ -x build/insanitty ] || { echo "build the app first: scripts/build-app.sh"; exit 1; }
+[ -x build/quic-client ] || bash tools/quic-client/build.sh
 export LD_LIBRARY_PATH="$GS/zig-out/lib" FANTASTTY_REMOTE_ADVERTISE_HOST=127.0.0.1 XDG_RUNTIME_DIR=/tmp/ins-remote-rt
 mkdir -p /tmp/inscfg/ghostty "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 echo "initial-window = false" > /tmp/inscfg/ghostty/config

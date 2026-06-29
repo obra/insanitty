@@ -11,6 +11,7 @@ nonisolated(unsafe) var gAttach: [UInt8] = []
 nonisolated(unsafe) var gAttachBuf = QUIC_BUFFER()
 nonisolated(unsafe) var gReceived = Data()
 nonisolated(unsafe) var gResult: String?
+nonisolated(unsafe) var gKeyframe: PaneKeyframe?   // the decoded grid, rendered to stdout for the GUI
 nonisolated(unsafe) var gExpectedPin: String?   // SPKI-SHA256 cert pin (from the bootstrap line)
 let gLock = NSLock()
 let gSem = DispatchSemaphore(value: 0)
@@ -26,6 +27,7 @@ func ingest(_ ptr: UnsafePointer<UInt8>, _ len: Int) {
     let complete = text.hasSuffix("\n") ? text : text[..<text.lastIndex(of: "\n")!].description
     for line in complete.split(separator: "\n").map(String.init) {
         if let msg = try? RemoteGridProtocol.decode(line: line), case let .paneKeyframe(kf) = msg {
+            gKeyframe = kf
             gResult = "NATIVE-QUIC-OK: native Swift client got paneKeyframe over QUIC — grid=\(kf.gridSize.columns)x\(kf.gridSize.rows), rows=\(kf.rows.count)"
             gSem.signal()
             return
@@ -129,6 +131,12 @@ _ = gApi.pointee.ConnectionOpen(reg, connCb, nil, &conn)
 _ = host.withCString { hp in gApi.pointee.ConnectionStart(conn, config, UInt16(0), hp, port) }
 
 _ = gSem.wait(timeout: .now() + 12)
-gLock.lock(); let result = gResult; let count = gReceived.count; gLock.unlock()
-if let result = result { print(result); exit(0) }
-print("native client: no keyframe decoded (\(count) bytes received)"); exit(1)
+gLock.lock(); let result = gResult; let kf = gKeyframe; let count = gReceived.count; gLock.unlock()
+if let result = result, let kf = kf {
+    // The rendered grid goes to stdout (the GUI injects it); the status line goes to stderr.
+    FileHandle.standardOutput.write(Data(RemoteGridRenderer.ansi(for: kf).utf8))
+    FileHandle.standardError.write(Data((result + "\n").utf8))
+    exit(0)
+}
+FileHandle.standardError.write(Data("native client: no keyframe decoded (\(count) bytes received)\n".utf8))
+exit(1)

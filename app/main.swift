@@ -367,9 +367,9 @@ func makeWorkspacePage(index: Int) -> OpaquePointer? {
     return vbox
 }
 
-/// A "remote (QUIC)" workspace: an inert surface that insanitty paints by injecting a grid
-/// fetched from the real remote-engine helper over QUIC (scripts/remote-grid-ansi.sh +
-/// insanitty_surface_inject_output). Demonstrates the remote feature set inside the GUI.
+/// A "remote (QUIC)" workspace: an inert surface that insanitty paints with a grid fetched by
+/// its own remote stack — launch-or-resume the helper, then the SPKI-pinned native QUIC client
+/// renders the grid (see injectRemoteGrid), injected via insanitty_surface_inject_output.
 func makeRemoteWorkspacePage() -> OpaquePointer? {
     let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
     let tabView = OP(adw_tab_view_new())
@@ -588,26 +588,47 @@ func makeControlModeWorkspacePage() -> OpaquePointer? {
 /// into the surface on the GTK main thread (`g_idle_add`). Fetching off the main loop keeps the
 /// UI responsive while the helper completes its QUIC handshake — a synchronous fetch here would
 /// freeze input handling for the duration.
+/// Run a process (optionally feeding stdin) and return its stdout, or nil on failure.
+func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let outPipe = Pipe(); p.standardOutput = outPipe; p.standardError = FileHandle.nullDevice
+    let inPipe = Pipe(); if stdin != nil { p.standardInput = inPipe }
+    do { try p.run() } catch { return nil }
+    if let stdin = stdin {
+        inPipe.fileHandleForWriting.write(Data(stdin.utf8))
+        inPipe.fileHandleForWriting.closeFile()
+    }
+    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return data
+}
+
+/// Fetch the remote pane grid by driving insanitty's OWN remote stack on a background thread —
+/// launch-or-resume the helper for the bootstrap line, then the SPKI-pinned native QUIC client
+/// (tools/quic-client) attaches over QUIC and renders the grid — and paint it into the surface on
+/// the GTK main thread. Replaces the old bash → Go-probe → Python demo bridge.
 func injectRemoteGrid() {
     guard remoteSurface != nil else { return }
     Thread.detachNewThread {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ["scripts/remote-grid-ansi.sh", "insanitty-remote-gui"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do {
-            try p.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            guard !data.isEmpty else { return }
-            gridLock.lock(); pendingGrid = data; gridLock.unlock()
-            g_idle_add(injectGridIdle, nil)
-            FileHandle.standardError.write(Data("insanitty: injected \(data.count) bytes of remote grid\n".utf8))
-        } catch {
-            FileHandle.standardError.write(Data("insanitty: remote fetch failed: \(error)\n".utf8))
+        let helper = FileManager.default.isExecutableFile(atPath: "build/fantastty-helper")
+            ? "build/fantastty-helper" : "/tmp/fantastty-helper"
+        // 1) launch-or-resume → the FANTASTTY_REMOTE bootstrap line.
+        guard let bootData = runProcess(helper,
+                ["launch-or-resume", "insanitty-remote-gui", "--ttl", "8h", "--key-ttl", "30s"]),
+              let line = String(decoding: bootData, as: UTF8.self).split(separator: "\n")
+                .map(String.init).first(where: { $0.hasPrefix("FANTASTTY_REMOTE ") }) else {
+            FileHandle.standardError.write(Data("insanitty: remote bootstrap failed\n".utf8)); return
         }
+        // 2) native SPKI-pinned QUIC client attaches and renders the grid to stdout.
+        guard let grid = runProcess("build/quic-client", ["--bootstrap"], stdin: line + "\n"),
+              !grid.isEmpty else {
+            FileHandle.standardError.write(Data("insanitty: native QUIC fetch failed\n".utf8)); return
+        }
+        gridLock.lock(); pendingGrid = grid; gridLock.unlock()
+        g_idle_add(injectGridIdle, nil)
+        FileHandle.standardError.write(Data("insanitty: injected \(grid.count) bytes of remote grid (native QUIC)\n".utf8))
     }
 }
 
