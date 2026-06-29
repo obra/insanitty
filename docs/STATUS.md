@@ -2,6 +2,24 @@
 
 What is actually built and verified, vs. what's pending. Updated as Phase 0 progresses.
 
+## Running app + end-to-end test (2026-06-29)
+
+**insanitty runs as a real local terminal workspace manager and passes an end-to-end
+interaction test.** `app/` (built by `scripts/build-app.sh`, linking `libghostty-gtk`) hosts
+Ghostty's `GApplication` and builds insanitty's own chrome: a header bar + a **sidebar of
+workspaces** (names from the ported `WorkspaceName`) + a `GtkStack`, each page a **live
+`GhosttySurface` terminal**. Clicking the sidebar switches workspaces.
+
+`scripts/e2e-scenario.sh` drives the running app through its UI with `xdotool` (headless:
+Xvfb + matchbox WM + `dbus-run-session`) and **passes**:
+- **Scenario 1** — typed `echo …$((6*7))` into a terminal; the embedded zsh ran it and rendered
+  `…-42` (`docs/images/e2e-1-typed-command.png`). Real input→pty→shell→render round-trip.
+- **Scenario 2** — switched to a second workspace and typed in its own live terminal
+  (`docs/images/e2e-2-second-workspace.png`).
+
+Screenshots: `docs/images/{insanitty-app,e2e-1-typed-command,e2e-2-second-workspace}.png`.
+Not yet: tabs, splits, tmux-backed persistence, notes/URLs, the remote engine (Spike C / msquic).
+
 ## Verified on the dev box (2026-06-29)
 
 Toolchain probed: Swift **6.3.2**, Zig **0.15.2**, GTK4 **4.14.5**, libadwaita **1.5.0**,
