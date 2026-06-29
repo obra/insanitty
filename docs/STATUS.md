@@ -2,6 +2,11 @@
 
 What is actually built and verified, vs. what's pending. Updated as Phase 0 progresses.
 
+> **For an honest, source-grounded comparison to macOS Fantastty, see [PARITY.md](PARITY.md).**
+> insanitty has a real terminal-workspace-manager core but is **not** at feature parity:
+> the remote engine in the GUI, full tmux control-mode, session/layout persistence,
+> integrations, settings, theming, sidebar snapshots, and overview are demo/stub/absent.
+
 ## Native QUIC transport + packaging (2026-06-29)
 
 - **Native Swift QUIC client** (`tools/quic-client`, `scripts/e2e-native-quic.sh` PASS): built
