@@ -457,3 +457,31 @@ final class SpriteCommandsTests: XCTestCase {
         XCTAssertNil(SpriteCommands.resolvePath(home: home) { _ in false })
     }
 }
+
+final class LinearTests: XCTestCase {
+    func testIssueQuery() {
+        let q = LinearGraphQL.query(for: .issue(identifier: "ENG-123"))
+        XCTAssertTrue(q.contains("issue(id: \"ENG-123\")"))
+        XCTAssertTrue(q.contains("priorityLabel"))
+    }
+    func testRequestBodyIsJSON() {
+        let body = LinearGraphQL.requestBody("{ x }")
+        let obj = try? JSONSerialization.jsonObject(with: body) as? [String: String]
+        XCTAssertEqual(obj?["query"], "{ x }")
+    }
+    func testParseIssue() {
+        let json = #"{"data":{"issue":{"identifier":"ENG-7","title":"Fix it","state":{"name":"In Progress"},"assignee":{"name":"Ada"},"priorityLabel":"High"}}}"#
+        let issue = LinearGraphQL.parseIssue(Data(json.utf8))
+        XCTAssertEqual(issue, LinearIssue(identifier: "ENG-7", title: "Fix it", stateName: "In Progress", assigneeName: "Ada", priorityLabel: "High"))
+    }
+    func testTokenStoreRoundTrip() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("ins-lin-\(UUID().uuidString)/linear-token")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try LinearTokenStore.save("lin_api_KEY", to: url)
+        XCTAssertEqual(LinearTokenStore.load(from: url), "lin_api_KEY")
+        let perm = (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
+        XCTAssertEqual(perm, 0o600)
+        LinearTokenStore.clear(at: url)
+        XCTAssertNil(LinearTokenStore.load(from: url))
+    }
+}

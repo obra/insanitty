@@ -9,6 +9,9 @@
 // Build: scripts/build-app.sh. Headless e2e: scripts/e2e-scenario.sh.
 import CGhostty
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // URLSession lives here on Linux
+#endif
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -1283,11 +1286,53 @@ func openSettings() {
     adw_preferences_group_add(P(remote), P(makeSwitchRow("Predictive echo", "Show typed keys immediately, before the remote echoes them back.", tag: 3, on: currentSettings.remotePredictiveEcho)))
     adw_preferences_page_add(P(page), P(remote))
 
+    let integrations = OP(adw_preferences_group_new())!
+    adw_preferences_group_set_title(P(integrations), "Integrations")
+    let keyRow = OP(adw_password_entry_row_new())!
+    adw_preferences_row_set_title(P(keyRow), "Linear API key")
+    if let tok = linearToken { gtk_editable_set_text(P(keyRow), tok) }
+    adw_entry_row_set_show_apply_button(P(keyRow), 1)
+    g_signal_connect_data(raw(keyRow), "apply", unsafeBitCast(linearKeyApplyCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_preferences_group_add(P(integrations), P(keyRow))
+    adw_preferences_page_add(P(page), P(integrations))
+
     adw_preferences_window_add(P(win), P(page))
     gtk_window_present(P(win))
 }
 
 let settingsBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openSettings() }
+
+// MARK: - Linear integration
+
+nonisolated(unsafe) var linearTokenURL = LinearTokenStore.defaultURL()
+nonisolated(unsafe) var linearToken = LinearTokenStore.load(from: LinearTokenStore.defaultURL())
+nonisolated(unsafe) var notesLinearIssue: LinearIssue?   // last fetched issue for the open notes panel
+
+let notesRefreshIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in rebuildNotesList(); return 0 }
+
+/// Fetch the Linear issue for a ticket URL (if a token is set) and refresh the open notes panel.
+func fetchLinearIssueForNotes(ticketURL: String) {
+    guard let token = linearToken, let resource = LinearURL.parse(ticketURL),
+          case .issue = resource, let url = URL(string: LinearGraphQL.endpoint) else { return }
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.setValue(token, forHTTPHeaderField: "Authorization")
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = LinearGraphQL.requestBody(LinearGraphQL.query(for: resource))
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+        guard let issue = data.flatMap({ LinearGraphQL.parseIssue($0) }) else { return }
+        notesLinearIssue = issue
+        g_idle_add(notesRefreshIdle, nil)
+    }.resume()
+}
+
+/// Settings: the Linear API key was applied → store (or clear) it.
+let linearKeyApplyCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { row, _ in
+    guard let cstr = gtk_editable_get_text(P(row)) else { return }
+    let key = String(cString: cstr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if key.isEmpty { LinearTokenStore.clear(at: linearTokenURL); linearToken = nil }
+    else { try? LinearTokenStore.save(key, to: linearTokenURL); linearToken = key }
+}
 
 // MARK: - Session notes
 
@@ -1305,11 +1350,28 @@ func noteTimeLabel(_ date: Date) -> String {
 func rebuildNotesList() {
     guard let list = notesList else { return }
     while let old = OP(gtk_widget_get_first_child(P(list))) { gtk_list_box_remove(P(list), P(old)) }
-    let notes = workspaceMeta[notesWorkspaceID]?.notes ?? []
-    if notes.isEmpty {
+    let m = workspaceMeta[notesWorkspaceID]
+    // Ticket / PR (from OSC) + the fetched Linear issue, if any.
+    if let ticket = m?.ticketURL, !ticket.isEmpty {
         let row = OP(adw_action_row_new())
-        adw_preferences_row_set_title(P(row), "No notes yet")
+        if let issue = notesLinearIssue {
+            adw_preferences_row_set_title(P(row), "\(issue.identifier): \(issue.title)")
+            adw_action_row_set_subtitle(P(row), "Linear · \(issue.stateName)" + (issue.assigneeName.map { " · \($0)" } ?? ""))
+        } else {
+            adw_preferences_row_set_title(P(row), "Ticket")
+            adw_action_row_set_subtitle(P(row), ticket)
+        }
         gtk_list_box_append(P(list), P(row))
+    }
+    if let pr = m?.pullRequestURL, !pr.isEmpty {
+        let row = OP(adw_action_row_new()); adw_preferences_row_set_title(P(row), "Pull request"); adw_action_row_set_subtitle(P(row), pr)
+        gtk_list_box_append(P(list), P(row))
+    }
+    let notes = m?.notes ?? []
+    if notes.isEmpty {
+        if (m?.ticketURL ?? "").isEmpty, (m?.pullRequestURL ?? "").isEmpty {
+            let row = OP(adw_action_row_new()); adw_preferences_row_set_title(P(row), "No notes yet"); gtk_list_box_append(P(list), P(row))
+        }
         return
     }
     for note in notes {
@@ -1339,6 +1401,8 @@ let notesAddCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Voi
 func openNotes() {
     guard let wsID = currentWorkspaceID() else { return }
     notesWorkspaceID = wsID
+    notesLinearIssue = nil
+    if let ticket = workspaceMeta[wsID]?.ticketURL, !ticket.isEmpty { fetchLinearIssueForNotes(ticketURL: ticket) }
     let name = currentWorkspace < tiles.count ? tiles[currentWorkspace].name : wsID
     let win = OP(adw_window_new())!
     gtk_window_set_title(P(win), "Notes — \(name)")
