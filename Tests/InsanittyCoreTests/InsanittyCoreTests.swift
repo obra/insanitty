@@ -125,6 +125,21 @@ final class RemoteGridProtocolTests: XCTestCase {
     }
 }
 
+final class LinearURLTests: XCTestCase {
+    func testParsesIssueURL() {
+        XCTAssertEqual(LinearURL.parse("https://linear.app/acme/issue/ABC-123/some-title"),
+                       .issue(identifier: "ABC-123"))
+    }
+    func testParsesProjectURL() {
+        XCTAssertEqual(LinearURL.parse("https://linear.app/acme/project/q4-roadmap?tab=overview"),
+                       .project(id: "q4-roadmap"))
+    }
+    func testIgnoresNonLinear() {
+        XCTAssertNil(LinearURL.parse("https://github.com/blaine/fantastty/pull/18"))
+        XCTAssertNil(LinearURL.parse("not a url"))
+    }
+}
+
 final class SplitGeometryTests: XCTestCase {
     func testInteractiveClamp() {
         XCTAssertEqual(SplitGeometry.clampInteractive(0.0), 0.1, accuracy: 1e-9)
