@@ -49,7 +49,7 @@ The sections below are the unvarnished detail.
 
 | Fantastty | insanitty | Notes |
 |---|---|---|
-| **tmux control mode (`-CC`)**: `TmuxControlClient`, protocol parser, V2 runtime, layout parser/mapper — windows↔tabs, panes↔splits, live layout sync | **ABSENT** | insanitty runs plain `tmux new-session -A -s insanitty-ws-N` for the **first shell of each workspace only**. No control mode, no window/pane↔tab/split mapping, no layout sync. This is the single largest engineering gap. |
+| **tmux control mode (`-CC`)**: `TmuxControlClient`, protocol parser, V2 runtime, layout parser/mapper — windows↔tabs, panes↔splits, live layout sync | **FOUNDATION** (`TmuxControlParser`, `TmuxLayoutParser` in InsanittyCore, 12 tests) | The control-protocol parser (`%output`/`%window-*`/`%layout-change`/`%begin…%end` + octal decode) and the `{}`/`[]` layout parser are ported and unit-tested. Remaining: the live `tmux -CC` client (needs a real PTY — `openpty`+`fork`/`exec`; tmux refuses pipes) and the GTK bridge (silent-shell surfaces + `inject_output` + layout→GtkPaned). Today the app still runs plain `tmux new-session -A` (first shell per workspace). |
 | Attach to existing session (local + SSH), `TmuxAttachSheet` | **ABSENT** | No attach UI. |
 | SSH remote tmux (`ssh -t … tmux -CC`) | **ABSENT** | |
 | `persistentSessions` toggle (default **off**), restore layout on launch | **PARTIAL** | tmux persistence is always-on for the primary shell and **verified** (`e2e-persistence.sh`: a process outlived an app kill, V1<V2<V3). But there is **no layout restore** — only the tmux server retains the shell; the app rebuilds a fresh default workspace set each launch. |

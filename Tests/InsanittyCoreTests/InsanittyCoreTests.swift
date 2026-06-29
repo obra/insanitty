@@ -196,3 +196,83 @@ final class AppLayoutTests: XCTestCase {
         XCTAssertNil(LayoutStore.load(from: URL(fileURLWithPath: "/nonexistent/insanitty/layout.json")))
     }
 }
+
+final class TmuxControlParserTests: XCTestCase {
+    func testOutputDecodesOctalEscapes() {
+        // %output for pane 3 carrying "hi\r\n" (CRLF octal-escaped by tmux as \015\012).
+        let event = TmuxControlParser.parse(line: "%output %3 hi\\015\\012")
+        XCTAssertEqual(event, .output(pane: 3, bytes: [0x68, 0x69, 0x0D, 0x0A]))
+    }
+
+    func testOctalDecodeRoundsTrip() {
+        XCTAssertEqual(TmuxControlParser.decodeOctalEscapes("a\\101b"), [0x61, 0x41, 0x62]) // \101 = 'A'
+        XCTAssertEqual(TmuxControlParser.decodeOctalEscapes("plain"), Array("plain".utf8))
+        // A lone backslash without three octal digits is kept literally.
+        XCTAssertEqual(TmuxControlParser.decodeOctalEscapes("x\\y"), Array("x\\y".utf8))
+    }
+
+    func testWindowEvents() {
+        XCTAssertEqual(TmuxControlParser.parse(line: "%window-add @2"), .windowAdd(window: 2))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%window-close @2"), .windowClose(window: 2))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%window-renamed @1 my window"),
+                       .windowRenamed(window: 1, name: "my window"))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%window-pane-changed @1 %5"),
+                       .windowPaneChanged(window: 1, pane: 5))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%session-window-changed $0 @2"),
+                       .sessionWindowChanged(window: 2))
+    }
+
+    func testLayoutChangeKeepsLayoutToken() {
+        XCTAssertEqual(
+            TmuxControlParser.parse(line: "%layout-change @1 bf5d,80x24,0,0,3 bf5d,80x24,0,0,3 *"),
+            .layoutChange(window: 1, layout: "bf5d,80x24,0,0,3"))
+    }
+
+    func testBlockAndExitEvents() {
+        XCTAssertEqual(TmuxControlParser.parse(line: "%begin 1700000000 7 1"), .begin(number: 7))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%end 1700000000 7 1"), .end(number: 7))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%error 1700000000 7 1"), .error(number: 7))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%exit"), .exit(reason: nil))
+        XCTAssertEqual(TmuxControlParser.parse(line: "%exit server exited"), .exit(reason: "server exited"))
+    }
+
+    func testUnknownAndPayloadLinesBecomeOther() {
+        XCTAssertEqual(TmuxControlParser.parse(line: "%pane-mode-changed %1"), .other("%pane-mode-changed %1"))
+        XCTAssertEqual(TmuxControlParser.parse(line: "0: 1 windows"), .other("0: 1 windows"))
+    }
+
+    func testTrailingCarriageReturnTolerated() {
+        XCTAssertEqual(TmuxControlParser.parse(line: "%window-add @4\r"), .windowAdd(window: 4))
+    }
+}
+
+final class TmuxLayoutParserTests: XCTestCase {
+    func testSingleLeaf() {
+        let node = TmuxLayoutParser.parse("bf5d,80x24,0,0,0")
+        XCTAssertEqual(node, .leaf(pane: 0))
+        XCTAssertEqual(node?.allPanes(), [0])
+    }
+
+    func testHorizontalSplit() {
+        let node = TmuxLayoutParser.parse("abcd,80x24,0,0{40x24,0,0,1,39x24,41,0,2}")
+        XCTAssertEqual(node, .horizontal([.leaf(pane: 1), .leaf(pane: 2)]))
+        XCTAssertEqual(node?.allPanes(), [1, 2])
+    }
+
+    func testVerticalSplit() {
+        let node = TmuxLayoutParser.parse("abcd,80x24,0,0[80x12,0,0,1,80x11,0,13,2]")
+        XCTAssertEqual(node, .vertical([.leaf(pane: 1), .leaf(pane: 2)]))
+        XCTAssertEqual(node?.allPanes(), [1, 2])
+    }
+
+    func testNestedSplit() {
+        let node = TmuxLayoutParser.parse("abcd,80x24,0,0{40x24,0,0,1,39x24,41,0[39x12,41,0,2,39x11,41,13,3]}")
+        XCTAssertEqual(node, .horizontal([.leaf(pane: 1), .vertical([.leaf(pane: 2), .leaf(pane: 3)])]))
+        XCTAssertEqual(node?.allPanes(), [1, 2, 3])
+    }
+
+    func testMalformedReturnsNil() {
+        XCTAssertNil(TmuxLayoutParser.parse("not-a-layout"))
+        XCTAssertNil(TmuxLayoutParser.parse("bf5d,80x24,0,0{40x24,0,0,1"))  // unclosed brace
+    }
+}
