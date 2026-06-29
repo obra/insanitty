@@ -1,1 +1,8 @@
 inspo/
+.build/
+zig-out/
+.zig-cache/
+vendor/ghostty/zig-out/
+*.o
+*.swiftmodule
+.DS_Store
