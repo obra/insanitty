@@ -42,6 +42,11 @@ no separate LAN machine is needed. Using the helper's reference QUIC client (its
    QUIC (`workspaceSnapshot` + `paneKeyframe`, byte-for-byte matching SPEC §4.3);
 2. **input** sent over QUIC reached the remote pane;
 3. **cert pinning enforced** — a wrong SPKI is rejected (`CRYPTO_ERROR … SPKI SHA256`).
+**And it's integrated into insanitty's GUI** (`scripts/e2e-remote-gui.sh`, PASS): a "remote
+(QUIC)" workspace shows a grid the app **fetched over QUIC from the helper** and injected into a
+surface via `insanitty_surface_inject_output` — `docs/images/e2e-7-remote-in-gui.png` shows the
+live QUIC addr, SPKI cert pin, 80×24 grid, 24 rows received, rendered in the GUI.
+
 So the remote protocol + QUIC transport + tmux→libghostty-vt server rendering + security all
 function. **insanitty's Swift protocol layer is ported and interop-verified:**
 `Sources/InsanittyCore/RemoteGridProtocol.swift` (the Codable wire types) decodes a payload
