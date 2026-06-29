@@ -72,4 +72,10 @@ import -window root "$OUT/e2e-4-tabs.png" 2>/dev/null
 grep -q "E2E-TAB-two" /tmp/app-e2e.log || fail "new-tab command did not reach a shell"
 echo "PASS scenario 4: Ctrl+T new tab with its own live terminal"
 
+# Scenario 5: open the Exposé overview (Ctrl+O) — a grid of all workspace thumbnails.
+xdotool key ctrl+o; sleep 2
+import -window root "$OUT/e2e-5-overview.png" 2>/dev/null
+grep -q "overview shown" /tmp/app-e2e.log || fail "Exposé overview did not open"
+echo "PASS scenario 5: Exposé overview opened with workspace thumbnails"
+
 echo "E2E PASS"

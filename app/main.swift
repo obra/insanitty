@@ -31,13 +31,16 @@ final class WorkspaceTile {
     let page: OpaquePointer
     let picture: OpaquePointer
     let livePaintable: OpaquePointer
-    init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer) {
-        self.page = page; self.picture = picture; self.livePaintable = livePaintable
+    let name: String
+    init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer, name: String) {
+        self.page = page; self.picture = picture; self.livePaintable = livePaintable; self.name = name
     }
 }
 nonisolated(unsafe) var tiles: [WorkspaceTile] = []
 nonisolated(unsafe) var sidebarList: OpaquePointer?
 nonisolated(unsafe) var currentWorkspace = 0
+nonisolated(unsafe) var overviewBox: OpaquePointer?   // Exposé overlay (hidden until toggled)
+nonisolated(unsafe) var overviewFlow: OpaquePointer?  // the GtkFlowBox of workspace tiles
 
 /// A live terminal pane that expands to fill its slot. If `command` is given, the surface
 /// runs it instead of the default shell (used for tmux-backed workspaces).
@@ -153,7 +156,7 @@ func registerWorkspace(_ page: OpaquePointer, name: String, id: String) -> Int {
     gtk_list_box_row_set_child(P(row), P(box))
     gtk_list_box_append(P(list), P(row))
 
-    tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable))
+    tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable, name: name))
     return tiles.count - 1
 }
 
@@ -180,6 +183,61 @@ func addWorkspace() {
     workspaceCounter += 1
     let tileIdx = registerWorkspace(page, name: WorkspaceName.generate(), id: "ws\(idx)")
     gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(tileIdx)))))
+}
+
+/// A flowbox tile in the overview was clicked → switch to that workspace and close the overview.
+let overviewActivatedCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, childPtr, _ in
+    guard let childPtr = childPtr, let list = sidebarList else { return }
+    let idx = Int(gtk_flow_box_child_get_index(P(childPtr)))
+    if let bg = overviewBox { gtk_widget_set_visible(P(bg), 0) }
+    if idx >= 0 { gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(idx))))) }
+}
+
+/// Build the Exposé overview overlay: a dimmed page over the content holding a scrollable
+/// GtkFlowBox of workspace tiles. Hidden until toggled.
+func buildOverview() -> OpaquePointer {
+    let bg = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
+    gtk_widget_add_css_class(P(bg), "background")
+    gtk_widget_set_visible(P(bg), 0)
+
+    let scroll = OP(gtk_scrolled_window_new())!
+    gtk_widget_set_hexpand(P(scroll), 1); gtk_widget_set_vexpand(P(scroll), 1)
+    let flow = OP(gtk_flow_box_new())!
+    overviewFlow = flow
+    gtk_flow_box_set_selection_mode(P(flow), GTK_SELECTION_NONE)
+    gtk_flow_box_set_min_children_per_line(P(flow), 2)
+    gtk_flow_box_set_max_children_per_line(P(flow), 4)
+    gtk_flow_box_set_homogeneous(P(flow), 1)
+    gtk_widget_set_halign(P(flow), GTK_ALIGN_CENTER); gtk_widget_set_valign(P(flow), GTK_ALIGN_CENTER)
+    gtk_widget_set_margin_top(P(flow), 24); gtk_widget_set_margin_bottom(P(flow), 24)
+    gtk_widget_set_margin_start(P(flow), 24); gtk_widget_set_margin_end(P(flow), 24)
+    g_signal_connect_data(raw(flow), "child-activated", unsafeBitCast(overviewActivatedCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_scrolled_window_set_child(P(scroll), P(flow))
+    gtk_box_append(P(bg), P(scroll))
+    return bg
+}
+
+/// Toggle the Exposé overview. On show, (re)build a tile per workspace reusing the sidebar
+/// picture's current paintable (live for the active workspace, the last still for visited ones).
+func toggleOverview() {
+    guard let bg = overviewBox, let flow = overviewFlow else { return }
+    if gtk_widget_get_visible(P(bg)) != 0 { gtk_widget_set_visible(P(bg), 0); return }
+
+    while let child = OP(gtk_widget_get_first_child(P(flow))) { gtk_flow_box_remove(P(flow), P(child)) }
+    for tile in tiles {
+        let pic = OP(gtk_picture_new())!
+        gtk_picture_set_paintable(P(pic), P(OP(gtk_picture_get_paintable(P(tile.picture)))))
+        gtk_picture_set_content_fit(P(pic), GTK_CONTENT_FIT_CONTAIN)
+        gtk_widget_set_size_request(P(pic), 320, 200)
+        let frame = OP(gtk_frame_new(nil))!
+        gtk_frame_set_child(P(frame), P(pic))
+        let label = OP(gtk_label_new(tile.name))!
+        let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 6))!
+        gtk_box_append(P(box), P(frame)); gtk_box_append(P(box), P(label))
+        gtk_flow_box_append(P(flow), P(box))
+    }
+    FileHandle.standardError.write(Data("insanitty: overview shown (\(tiles.count) workspaces)\n".utf8))
+    gtk_widget_set_visible(P(bg), 1)
 }
 
 /// New WebKitGTK browser tab in the current workspace (Fantastty has browser tabs).
@@ -276,6 +334,9 @@ let rowSelectedCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutable
     selectWorkspace(Int(gtk_list_box_row_get_index(P(rowPtr))))
 }
 
+/// Header "Overview" button clicked → toggle the Exposé overview.
+let overviewBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in toggleOverview() }
+
 func buildWindow() {
     let win = OP(adw_application_window_new(P(gapp)))
     mainWindow = win
@@ -310,11 +371,22 @@ func buildWindow() {
     gtk_box_append(P(content), P(OP(gtk_separator_new(GTK_ORIENTATION_VERTICAL))))
     gtk_box_append(P(content), P(stack))
 
+    // Overlay the Exposé overview on top of the content (hidden until toggled).
+    let overlay = OP(gtk_overlay_new())!
+    gtk_overlay_set_child(P(overlay), P(content))
+    let overview = buildOverview()
+    overviewBox = overview
+    gtk_overlay_add_overlay(P(overlay), P(overview))
+
     let header = OP(adw_header_bar_new())
     adw_header_bar_set_title_widget(P(header), P(OP(gtk_label_new("insanitty"))))
+    let overviewBtn = OP(gtk_button_new_from_icon_name("view-grid-symbolic"))!
+    gtk_widget_set_tooltip_text(P(overviewBtn), "Overview (Ctrl+O)")
+    g_signal_connect_data(raw(overviewBtn), "clicked", unsafeBitCast(overviewBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_header_bar_pack_start(P(header), P(overviewBtn))
     let toolbar = OP(adw_toolbar_view_new())
     adw_toolbar_view_add_top_bar(P(toolbar), P(header))
-    adw_toolbar_view_set_content(P(toolbar), P(content))
+    adw_toolbar_view_set_content(P(toolbar), P(overlay))
     adw_application_window_set_content(P(win), P(toolbar))
 
     // Ctrl+D / Ctrl+Shift+D split shortcuts (capture phase, so we see them before the surface).
@@ -335,6 +407,10 @@ func buildWindow() {
         }
         if ctrl && (keyval == GDK_KEY_n || keyval == GDK_KEY_N) {
             addWorkspace()
+            return 1
+        }
+        if ctrl && (keyval == GDK_KEY_o || keyval == GDK_KEY_O) {
+            toggleOverview()
             return 1
         }
         return 0
