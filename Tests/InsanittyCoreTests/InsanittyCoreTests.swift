@@ -76,6 +76,55 @@ final class RemoteBootstrapLineTests: XCTestCase {
     }
 }
 
+/// Decodes a payload captured live from the Go remote-engine helper over QUIC, proving
+/// insanitty's Swift protocol layer interoperates with the real server (see
+/// scripts/e2e-remote-engine.sh, which produced Fixtures/remote-grid-payload.jsonl).
+final class RemoteGridProtocolTests: XCTestCase {
+    private func fixtureLines() throws -> [String] {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/remote-grid-payload.jsonl")
+        let content = try String(contentsOf: url, encoding: .utf8)
+        return content.split(separator: "\n").map(String.init)
+    }
+
+    func testDecodesRealHelperPayload() throws {
+        let lines = try fixtureLines()
+        XCTAssertEqual(lines.count, 2, "fixture should be a workspaceSnapshot + a paneKeyframe")
+
+        guard case let .workspaceSnapshot(snap) = try RemoteGridProtocol.decode(line: lines[0]) else {
+            return XCTFail("first message should be a workspaceSnapshot")
+        }
+        XCTAssertEqual(snap.workspaceID, "insanitty-fixture")
+        XCTAssertEqual(snap.windows.count, 1)
+        XCTAssertEqual(snap.panes.first?.frame.columns, 80)
+        XCTAssertEqual(snap.panes.first?.frame.rows, 24)
+
+        guard case let .paneKeyframe(kf) = try RemoteGridProtocol.decode(line: lines[1]) else {
+            return XCTFail("second message should be a paneKeyframe")
+        }
+        XCTAssertEqual(kf.paneID, 0)
+        XCTAssertEqual(kf.gridSize.columns, 80)
+        XCTAssertEqual(kf.gridSize.rows, 24)
+        XCTAssertEqual(kf.rows.count, 24, "keyframe should carry all 24 rows")
+        // Compact `text` rows normalize to one width-1 cell per column.
+        XCTAssertEqual(kf.rows.first?.cells.count, 80)
+    }
+
+    func testColorAndRowEncodings() throws {
+        // Full-cell row with an indexed color + bold, and the Codable enum/color shapes.
+        let json = """
+        {"index":0,"rowVersion":1,"cells":[{"text":"X","width":1,"style":{"foreground":{"indexed":{"_0":4}},"background":{"default":{}},"underlineColor":{"default":{}},"bold":true,"faint":false,"italic":false,"blink":false,"inverse":false,"invisible":false,"strikethrough":false,"underline":"single"}}]}
+        """
+        let row = try JSONDecoder().decode(GridRow.self, from: Data(json.utf8))
+        XCTAssertEqual(row.cells.count, 1)
+        XCTAssertEqual(row.cells[0].text, "X")
+        XCTAssertEqual(row.cells[0].style.foreground, .indexed(4))
+        XCTAssertTrue(row.cells[0].style.bold)
+        XCTAssertEqual(row.cells[0].style.underline, .single)
+    }
+}
+
 final class SplitGeometryTests: XCTestCase {
     func testInteractiveClamp() {
         XCTAssertEqual(SplitGeometry.clampInteractive(0.0), 0.1, accuracy: 1e-9)

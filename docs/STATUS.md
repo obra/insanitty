@@ -43,8 +43,12 @@ no separate LAN machine is needed. Using the helper's reference QUIC client (its
 2. **input** sent over QUIC reached the remote pane;
 3. **cert pinning enforced** — a wrong SPKI is rejected (`CRYPTO_ERROR … SPKI SHA256`).
 So the remote protocol + QUIC transport + tmux→libghostty-vt server rendering + security all
-function. Remaining for the remote feature *in insanitty itself*: port the Swift client
-transport (msquic) + the ~3k lines of protocol/grid/echo logic (the Go probe is the reference).
+function. **insanitty's Swift protocol layer is ported and interop-verified:**
+`Sources/InsanittyCore/RemoteGridProtocol.swift` (the Codable wire types) decodes a payload
+captured live from the helper over QUIC (`swift test` → `RemoteGridProtocolTests`, against
+`Fixtures/remote-grid-payload.jsonl`). So the decode half of insanitty's remote client works
+against the real server; remaining is the **Swift QUIC transport** (msquic binding — the Go
+probe is the working reference) + predictive echo.
 
 Not yet (deferred): the full tmux **control-mode** mapping (tmux windows↔tabs, panes↔splits
 within ONE session per workspace — currently each workspace attaches its own session, splits
