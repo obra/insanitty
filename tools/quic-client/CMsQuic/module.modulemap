@@ -1,0 +1,4 @@
+module CMsQuic [system] {
+    umbrella header "shim.h"
+    export *
+}
