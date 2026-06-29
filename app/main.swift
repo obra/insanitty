@@ -24,6 +24,19 @@ nonisolated(unsafe) var pendingRemoteInput: [UInt8] = []              // keystro
 let remoteLock = NSLock()
 nonisolated(unsafe) var remoteRendered = false   // true once the remote workspace has painted once
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
+nonisolated(unsafe) var settingsURL = SettingsStore.defaultURL()
+nonisolated(unsafe) var currentSettings = SettingsStore.load(from: SettingsStore.defaultURL())
+
+/// Apply the appearance mode to the libadwaita chrome (sidebar/header bar light/dark). `.system`
+/// follows the desktop preference; `.light`/`.dark` force it.
+func applyAppearance(_ mode: AppearanceMode) {
+    guard let mgr = adw_style_manager_get_default() else { return }
+    switch mode {
+    case .system: adw_style_manager_set_color_scheme(mgr, ADW_COLOR_SCHEME_DEFAULT)
+    case .light:  adw_style_manager_set_color_scheme(mgr, ADW_COLOR_SCHEME_FORCE_LIGHT)
+    case .dark:   adw_style_manager_set_color_scheme(mgr, ADW_COLOR_SCHEME_FORCE_DARK)
+    }
+}
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
 nonisolated(unsafe) var surfaces = Set<OpaquePointer>()
 
@@ -733,6 +746,81 @@ let rowSelectedCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutable
 /// Header "Overview" button clicked → toggle the Exposé overview.
 let overviewBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in toggleOverview() }
 
+/// Persist the current settings (best-effort).
+func saveSettings() { try? SettingsStore.save(currentSettings, to: settingsURL) }
+
+/// Appearance theme combo changed → apply live + persist.
+let settingsThemeCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { row, _, _ in
+    let idx = Int(adw_combo_row_get_selected(P(row)))
+    let mode = idx < AppearanceMode.allCases.count ? AppearanceMode.allCases[idx] : .system
+    currentSettings.appearance = mode
+    applyAppearance(mode)
+    saveSettings()
+}
+
+/// A settings switch toggled → update the field tagged by user_data + persist.
+let settingsSwitchCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { row, _, ud in
+    let active = adw_switch_row_get_active(P(row)) != 0
+    switch Int(bitPattern: ud) {
+    case 1: currentSettings.tabsInSidebar = active
+    case 2: currentSettings.persistentSessions = active
+    case 3: currentSettings.remotePredictiveEcho = active
+    default: break
+    }
+    saveSettings()
+}
+
+/// A switch row bound to a settings field (selected by `tag`), initialized to `on`.
+func makeSwitchRow(_ title: String, _ subtitle: String?, tag: Int, on: Bool) -> OpaquePointer? {
+    let row = OP(adw_switch_row_new())!
+    adw_preferences_row_set_title(P(row), title)
+    if let subtitle = subtitle { adw_action_row_set_subtitle(P(row), subtitle) }
+    adw_switch_row_set_active(P(row), on ? 1 : 0)
+    g_signal_connect_data(raw(row), "notify::active", unsafeBitCast(settingsSwitchCb, to: GCallback.self),
+                          UnsafeMutableRawPointer(bitPattern: tag), nil, GConnectFlags(rawValue: 0))
+    return row
+}
+
+/// Open the preferences window: Appearance / Sidebar / Sessions / Remote Engine. Changes apply
+/// and persist immediately (matching Fantastty's live SettingsView).
+func openSettings() {
+    let win = OP(adw_preferences_window_new())!
+    if let mw = mainWindow { gtk_window_set_transient_for(P(win), P(mw)); gtk_window_set_modal(P(win), 1) }
+    let page = OP(adw_preferences_page_new())!
+
+    let appearance = OP(adw_preferences_group_new())!
+    adw_preferences_group_set_title(P(appearance), "Appearance")
+    let themeRow = OP(adw_combo_row_new())!
+    adw_preferences_row_set_title(P(themeRow), "Theme")
+    let model = OP(gtk_string_list_new(nil))
+    for label in AppearanceMode.allCases.map({ $0.label }) { gtk_string_list_append(P(model), label) }
+    adw_combo_row_set_model(P(themeRow), P(model))
+    adw_combo_row_set_selected(P(themeRow), guint(AppearanceMode.allCases.firstIndex(of: currentSettings.appearance) ?? 0))
+    g_signal_connect_data(raw(themeRow), "notify::selected", unsafeBitCast(settingsThemeCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_preferences_group_add(P(appearance), P(themeRow))
+    adw_preferences_page_add(P(page), P(appearance))
+
+    let sidebar = OP(adw_preferences_group_new())!
+    adw_preferences_group_set_title(P(sidebar), "Sidebar")
+    adw_preferences_group_add(P(sidebar), P(makeSwitchRow("Show tab thumbnails in sidebar", nil, tag: 1, on: currentSettings.tabsInSidebar)))
+    adw_preferences_page_add(P(page), P(sidebar))
+
+    let sessions = OP(adw_preferences_group_new())!
+    adw_preferences_group_set_title(P(sessions), "Sessions")
+    adw_preferences_group_add(P(sessions), P(makeSwitchRow("Persistent terminal sessions", "Terminals run inside tmux; sessions survive app restarts.", tag: 2, on: currentSettings.persistentSessions)))
+    adw_preferences_page_add(P(page), P(sessions))
+
+    let remote = OP(adw_preferences_group_new())!
+    adw_preferences_group_set_title(P(remote), "Remote Engine")
+    adw_preferences_group_add(P(remote), P(makeSwitchRow("Predictive echo", "Show typed keys immediately, before the remote echoes them back.", tag: 3, on: currentSettings.remotePredictiveEcho)))
+    adw_preferences_page_add(P(page), P(remote))
+
+    adw_preferences_window_add(P(win), P(page))
+    gtk_window_present(P(win))
+}
+
+let settingsBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openSettings() }
+
 /// Persist the layout when the window is closing (returns PROPAGATE so the close proceeds).
 let closeRequestCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> gboolean = { _, _ in
     saveLayout(); return 0
@@ -809,6 +897,10 @@ func buildWindow() {
     gtk_widget_set_tooltip_text(P(overviewBtn), "Overview (Ctrl+O)")
     g_signal_connect_data(raw(overviewBtn), "clicked", unsafeBitCast(overviewBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
     adw_header_bar_pack_start(P(header), P(overviewBtn))
+    let settingsBtn = OP(gtk_button_new_from_icon_name("emblem-system-symbolic"))!
+    gtk_widget_set_tooltip_text(P(settingsBtn), "Settings")
+    g_signal_connect_data(raw(settingsBtn), "clicked", unsafeBitCast(settingsBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_header_bar_pack_end(P(header), P(settingsBtn))
     let toolbar = OP(adw_toolbar_view_new())
     adw_toolbar_view_add_top_bar(P(toolbar), P(header))
     adw_toolbar_view_set_content(P(toolbar), P(overlay))
@@ -866,6 +958,7 @@ guard let a = insanitty_app_init() else {
     FileHandle.standardError.write(Data("insanitty: app_init failed\n".utf8)); exit(1)
 }
 gapp = OP(a)
+applyAppearance(currentSettings.appearance)
 buildWindow()
 
 if ProcessInfo.processInfo.environment["INSANITTY_SMOKE"] != nil {

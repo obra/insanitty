@@ -304,3 +304,51 @@ final class RemoteGridRendererTests: XCTestCase {
         XCTAssertTrue(ansi.contains("\u{1b}[\(kf.cursor.row + 1);\(kf.cursor.column + 1)H"), "cursor")
     }
 }
+
+final class SettingsTests: XCTestCase {
+    func testDefaults() {
+        let s = Settings()
+        XCTAssertEqual(s.appearance, .system)
+        XCTAssertFalse(s.tabsInSidebar)
+        XCTAssertFalse(s.persistentSessions)
+        XCTAssertTrue(s.remotePredictiveEcho)
+    }
+
+    func testAppearanceModeCases() {
+        XCTAssertEqual(AppearanceMode.allCases, [.system, .light, .dark])
+        XCTAssertEqual(AppearanceMode.dark.label, "Dark")
+        XCTAssertEqual(AppearanceMode(rawValue: "light"), .light)
+    }
+
+    func testStoreRoundTrip() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ins-settings-\(UUID().uuidString)/settings.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let s = Settings(appearance: .dark, tabsInSidebar: true, persistentSessions: true, remotePredictiveEcho: false)
+        try SettingsStore.save(s, to: url)
+        XCTAssertEqual(SettingsStore.load(from: url), s)
+    }
+
+    func testLoadMissingReturnsDefaults() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ins-nope-\(UUID().uuidString)/settings.json")
+        XCTAssertEqual(SettingsStore.load(from: url), Settings())
+    }
+
+    func testTolerantDecodeFillsMissingKeys() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ins-partial-\(UUID().uuidString)/settings.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Only one key present — the rest must fall back to defaults, not fail.
+        try Data(#"{"appearance":"dark"}"#.utf8).write(to: url)
+        let s = SettingsStore.load(from: url)
+        XCTAssertEqual(s.appearance, .dark)
+        XCTAssertEqual(s.remotePredictiveEcho, Settings().remotePredictiveEcho)
+    }
+
+    func testDefaultURLHonorsXdgStateHome() {
+        let url = SettingsStore.defaultURL(environment: ["XDG_STATE_HOME": "/tmp/xs"], home: "/home/u")
+        XCTAssertEqual(url.path, "/tmp/xs/insanitty/settings.json")
+    }
+}

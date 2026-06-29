@@ -90,8 +90,8 @@ This is the most nuanced area and the most overstated in earlier notes. Breaking
 | Linear (`LinearService`: API + Keychain token + UI) | **TEST-ONLY** | `LinearURL.swift` parses issue/project URLs (tested) but is **wired to nobody** — no GraphQL, no token, no UI. |
 | Sprites (external Fly.io `sprite` CLI) | **ABSENT** | |
 | Notifications | **ABSENT** | |
-| Theming (`ThemeManager`, `AppearanceMode`/dark mode) | **ABSENT** | The `.deb` bundles Ghostty's theme files, but insanitty has **no** theme selection or appearance UI. |
-| Settings / preferences (`@AppStorage` keys) | **ABSENT** | No settings UI or config reading. |
+| Theming (`ThemeManager`, `AppearanceMode`/dark mode) | **REAL** (`AppearanceMode`, `applyAppearance`) | System/Light/Dark, persisted in `settings.json`, applied to the libadwaita chrome via `AdwStyleManager` at startup and live on change. Verified: a dark preference loads dark chrome (`scripts/e2e-settings.sh`, `docs/images/e2e-8-settings.png`). |
+| Settings / preferences (`@AppStorage` keys) | **REAL** (`Settings`/`SettingsStore`, `openSettings`) | An `AdwPreferencesWindow` (gear in the header) with Appearance (theme), Sidebar (tab thumbnails), Sessions (persistent sessions), Remote Engine (predictive echo); changes apply + persist immediately to `$XDG_STATE_HOME/insanitty/settings.json`. Store + tolerant decode unit-tested (6 tests); window + live-persist e2e-verified (`scripts/e2e-settings.sh`). |
 
 ## Keyboard shortcuts
 
