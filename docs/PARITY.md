@@ -22,13 +22,13 @@ workspace sidebar, per-workspace tmux persistence, a real browser, layout persis
 live input round-trip, predictive echo, held-connection continuous re-poll), **full
 tmux control-mode** (windows↔tabs, panes↔splits, input, sizing), **settings + theming**
 (system/light/dark), **session notes** with edit history, **per-workspace metadata**
-(`workspaces.json`: notes, archive/trash, active-time, ticket/PR fields), and desktop
-**notifications** (inherited from ghostty's apprt). ~22 of ~37 rows are REAL.
+(`workspaces.json`: notes, archive/trash, active-time, ticket/PR fields), **OSC 9
+note/ticket/pr** interception (shell → embedding hook → workspace metadata), and desktop
+**notifications** (inherited from ghostty's apprt). ~23 of ~37 rows are REAL.
 
-Remaining gaps (honestly scoped, see rows below): **OSC 9 note/ticket/pr interception**
-(the store half is built; the surface→app interception needs a `patches/ghostty-gtk-embed.patch`
-hook + rebuild), **datagram-delta external streaming** (background remote output appears on
-the next interaction, not autonomously), **full within-workspace layout restore** (would
+Remaining gaps (honestly scoped, see rows below): **datagram-delta external streaming**
+(background remote output appears on the next interaction, not autonomously), **full
+within-workspace layout restore** (would
 need tmux-backed splits everywhere), and the integration/infra items — **Linear**,
 **sprites** (Fly.io CLI), **SSH remote transport**, **attach UI** — which need external
 services or an SSH host to build against.
