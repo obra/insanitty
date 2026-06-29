@@ -10,21 +10,36 @@ nonisolated(unsafe) var gApi: UnsafePointer<QUIC_API_TABLE>!
 nonisolated(unsafe) var gAttach: [UInt8] = []
 nonisolated(unsafe) var gAttachBuf = QUIC_BUFFER()
 nonisolated(unsafe) var gReceived = Data()
+nonisolated(unsafe) var gResult: String?
+let gLock = NSLock()
 let gSem = DispatchSemaphore(value: 0)
 
-func gotKeyframe() -> Bool { String(decoding: gReceived, as: UTF8.self).contains("\"paneKeyframe\"") }
+// Append received bytes and, once a complete paneKeyframe line is present, decode it here
+// (under the lock) so the main thread never reads mid-mutation.
+func ingest(_ ptr: UnsafePointer<UInt8>, _ len: Int) {
+    gLock.lock(); defer { gLock.unlock() }
+    gReceived.append(ptr, count: len)
+    guard gResult == nil, gReceived.contains(0x0A) else { return }
+    let text = String(decoding: gReceived, as: UTF8.self)
+    // Only consider complete (newline-terminated) lines.
+    let complete = text.hasSuffix("\n") ? text : text[..<text.lastIndex(of: "\n")!].description
+    for line in complete.split(separator: "\n").map(String.init) {
+        if let msg = try? RemoteGridProtocol.decode(line: line), case let .paneKeyframe(kf) = msg {
+            gResult = "NATIVE-QUIC-OK: native Swift client got paneKeyframe over QUIC — grid=\(kf.gridSize.columns)x\(kf.gridSize.rows), rows=\(kf.rows.count)"
+            gSem.signal()
+            return
+        }
+    }
+}
 
 let streamCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?, UnsafeMutablePointer<QUIC_STREAM_EVENT>?) -> UInt32 = { _, _, ev in
-    guard let ev = ev else { return 0 }
-    if ev.pointee.Type == QUIC_STREAM_EVENT_RECEIVE {
-        let n = Int(ins_recv_count(ev))
-        if let bufs = ins_recv_buffers(ev) {
-            for i in 0..<n {
-                let b = bufs[i]
-                if let p = b.Buffer { gReceived.append(p, count: Int(b.Length)) }
-            }
+    guard let ev = ev, ev.pointee.Type == QUIC_STREAM_EVENT_RECEIVE else { return 0 }
+    let n = Int(ins_recv_count(ev))
+    if let bufs = ins_recv_buffers(ev) {
+        for i in 0..<n {
+            let b = bufs[i]
+            if let p = b.Buffer { ingest(p, Int(b.Length)) }
         }
-        if gotKeyframe() { gSem.signal() }
     }
     return 0
 }
@@ -77,16 +92,7 @@ var conn: OpaquePointer?
 _ = gApi.pointee.ConnectionOpen(reg, connCb, nil, &conn)
 _ = args[1].withCString { hp in gApi.pointee.ConnectionStart(conn, config, UInt16(0), hp, port) }
 
-if gSem.wait(timeout: .now() + 12) == .timedOut {
-    FileHandle.standardError.write(Data("timed out; received \(gReceived.count) bytes\n".utf8))
-}
-
-var ok = false
-for line in String(decoding: gReceived, as: UTF8.self).split(separator: "\n").map(String.init) {
-    if let msg = try? RemoteGridProtocol.decode(line: line), case let .paneKeyframe(kf) = msg {
-        print("NATIVE-QUIC-OK: native Swift client got paneKeyframe over QUIC — grid=\(kf.gridSize.columns)x\(kf.gridSize.rows), rows=\(kf.rows.count)")
-        ok = true; break
-    }
-}
-if !ok { print("native client: no keyframe decoded (\(gReceived.count) bytes received)") }
-exit(ok ? 0 : 1)
+_ = gSem.wait(timeout: .now() + 12)
+gLock.lock(); let result = gResult; let count = gReceived.count; gLock.unlock()
+if let result = result { print(result); exit(0) }
+print("native client: no keyframe decoded (\(count) bytes received)"); exit(1)
