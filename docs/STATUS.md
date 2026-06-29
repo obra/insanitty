@@ -10,7 +10,7 @@ Go 1.22, tmux 3.4, clang 18, Xvfb. 16 cores / 60 GiB RAM, x86_64 / glibc 2.39, h
 | Pillar | Result |
 |---|---|
 | **Swift on Linux** | ✅ Swift 6.3.2 compiles; Foundation/Codable work; `swift test` = **11/11 passing** (ported `WorkspaceName`, `RemoteBootstrapLine`, `SplitGeometry`). |
-| **Ghostty engine builds (Zig)** | ✅ `zig build -Demit-lib-vt` produces `libghostty-vt.so` (+ `.a`, pkg-config) on this box. The hardest external dependency compiles. |
+| **Ghostty engine builds (Zig)** | ✅ `zig build -Demit-lib-vt` → `libghostty-vt.so`. **And the full GTK frontend builds + runs**: `zig build -Doptimize=Debug -Dgtk-wayland=false -Dgtk-x11=true` → a 150 MB `ghostty` binary linking libgtk-4 + libadwaita-1; `ghostty +version` prints `1.3.2-HEAD-+5d0a82ba3` headless under Xvfb. The entire engine-reuse path (incl. the `GhosttySurface` widget) compiles on this box. |
 | **Swift ↔ GTK4/libadwaita interop** | ✅ `spike-gtk-smoke` and the `insanitty` app shell **compile, link, and run headless under Xvfb**: GTK init, `AdwStyleManager`, a real `GtkPaned` widget tree, an `AdwApplicationWindow` with sidebar + split. (This validates report `10`'s recommended "Swift + direct C interop" approach.) |
 | **SwiftPM + pkg-config** | ✅ builds; SwiftPM strips the stray `-mfpmath=sse`/`-pthread` cflags (warnings only). |
 | **App shell skeleton** | ✅ `INSANITTY_SMOKE=1 xvfb-run -a .build/debug/insanitty` opens the window (sidebar of generated workspace names + split placeholders) and self-quits, exit 0. |
@@ -20,15 +20,29 @@ Go 1.22, tmux 3.4, clang 18, Xvfb. 16 cores / 60 GiB RAM, x86_64 / glibc 2.39, h
 | Spike | State |
 |---|---|
 | **D — SplitTree on GtkPaned** | Substrate proven (GtkPaned tree builds/runs); `SplitGeometry` oracle constants ported + tested. Remaining: rebind the full `SplitTree` leaf type. |
-| **A — embed Ghostty GTK surface** | **Blocked on this box:** the Ghostty *GTK frontend* build needs `blueprint-compiler` + `msgfmt` (gettext tools), which are not installed (and likely need apt). The C bridge (`Sources/CInsanitty`) and shim API are in place with a placeholder backend, so the shell runs today. |
+| **A — embed Ghostty GTK surface** | **Engine half done:** Ghostty's GTK frontend now **builds + runs here** (recipe below). Remaining: wire the real `Sources/CInsanitty` shim — host Ghostty's GTK `Application` and construct a `GhosttySurface` to parent into our chrome (replacing the placeholder). The shell + bridge API are already in place. |
 | **B — re-home inject_output/remote_grid patch** | Pending the GTK Ghostty build (A). The patch (`patches/ghostty-inject-output.patch`) is verified to apply at the pinned commit; bodies are renderer-agnostic. |
 | **C — msquic ↔ Go helper** | Pending: `msquic` not installed, and needs a LAN host running the helper. Bootstrap-line parser already ported + tested. |
 
-## Not yet installed here (needed for later phases)
+## Ghostty GTK build recipe (verified on this box)
 
-`msquic` (remote engine), `webkitgtk-6.0` (browser tabs), `libsecret-1` (Linear token),
-`libnotify` (desktop notifications), `blueprint-compiler` + `gettext` bin (Ghostty GTK build).
-See `scripts/setup-dev-env.sh`.
+The distro toolchain isn't enough; the exact recipe that works:
+- **blueprint-compiler ≥ 0.16** (0.20.4 used) installed via **meson** (apt's 0.12.0 fails on
+  `1.5/*.blp`; a run-from-source copy reports version "uninstalled" → Ghostty's
+  `InvalidVersion` build error). `scripts/setup-dev-env.sh` does the meson install.
+- **gettext** (`msgfmt`), GTK4/libadwaita dev, webkitgtk/libsecret/libnotify dev.
+- `zig build -Doptimize=Debug -Dgtk-wayland=false -Dgtk-x11=true` — X11-only avoids the
+  `gtk4-layer-shell-0` lib (not in Ubuntu's default repos; build it from source to enable
+  Wayland). X11 suits the headless Xvfb box.
+
+## Installed during this session
+
+webkitgtk-6.0, libsecret-1, libnotify, gettext, blueprint-compiler 0.20.4 (meson), meson+ninja.
+
+## Still needed (later phases)
+
+`msquic` (remote engine — build from https://github.com/microsoft/msquic; Spike C),
+`gtk4-layer-shell` from source (only if a Wayland build is wanted). See `scripts/setup-dev-env.sh`.
 
 ## Environment limitations (not blockers, but shape what can be *run* here)
 

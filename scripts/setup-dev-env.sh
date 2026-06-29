@@ -7,16 +7,19 @@ set -euo pipefail
 
 ZIG_VERSION="0.15.2"          # must match the forked Ghostty's build.zig.zon
 SWIFT_CHANNEL="latest"        # swiftly release channel (Swift 6.x)
+BLUEPRINT_VERSION="0.20.4"    # verified to compile Ghostty's 1.5/*.blp (apt's 0.12.0 fails)
 
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 
 say "1/3 System packages (apt — needs sudo)"
 # GTK4 + libadwaita dev (chrome), Ghostty GTK build tools (blueprint-compiler, gettext),
 # remote/aux deps (webkitgtk, libsecret, libnotify), and Xvfb for headless runs.
+# NOTE: do NOT use apt's blueprint-compiler — Ubuntu 24.04 ships 0.12.0, which is too old
+# for Ghostty's `.blp` files (they use `template $Class: Adw.Bin` syntax). We install a
+# newer one from source below (verified: v0.16.0 compiles them).
 APT_PKGS=(
-  build-essential pkg-config git curl xvfb
+  build-essential pkg-config git curl xvfb gettext
   libgtk-4-dev libadwaita-1-dev
-  blueprint-compiler gettext
   libwebkitgtk-6.0-dev libsecret-1-dev libnotify-dev
 )
 if command -v apt-get >/dev/null; then
@@ -26,6 +29,16 @@ if command -v apt-get >/dev/null; then
 else
   echo "Non-apt distro: install equivalents of: ${APT_PKGS[*]}"
 fi
+
+say "1b/3 blueprint-compiler ${BLUEPRINT_VERSION} from source (Ghostty needs > distro's 0.12.0)"
+# Run-from-source: no meson/install needed; symlink the entry point onto PATH.
+BP_DIR="$HOME/.local/blueprint-compiler"
+if [ ! -d "$BP_DIR/.git" ]; then
+  git clone --quiet https://gitlab.gnome.org/jwestman/blueprint-compiler.git "$BP_DIR"
+fi
+git -C "$BP_DIR" checkout -q "v${BLUEPRINT_VERSION}"
+ln -sf "$BP_DIR/blueprint-compiler.py" "$HOME/.local/bin/blueprint-compiler"
+echo "blueprint-compiler: $("$HOME/.local/bin/blueprint-compiler" --version) (from $BP_DIR @ v${BLUEPRINT_VERSION})"
 
 say "2/3 Zig ${ZIG_VERSION} (user-local, no root)"
 if ! "$HOME/.local/zig-${ZIG_VERSION}/zig" version 2>/dev/null | grep -q "${ZIG_VERSION}"; then

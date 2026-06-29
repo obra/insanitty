@@ -29,10 +29,17 @@ echo "Building libghostty-vt (Zig $($ZIG version)) ..."
 ( cd "$SRC" && "$ZIG" build -Demit-lib-vt=true -Doptimize=ReleaseFast )
 ls -la "$SRC"/zig-out/lib/libghostty-vt* || true
 
+echo "Building the GTK frontend (verifies the GhosttySurface widget) ..."
+# X11-only avoids gtk4-layer-shell-0 (not in default Ubuntu repos). Drop the flags below
+# to build with Wayland once gtk4-layer-shell is installed from source.
+# Requires blueprint-compiler >= 0.16 via meson (see scripts/setup-dev-env.sh).
+( cd "$SRC" && "$ZIG" build -Doptimize=ReleaseFast -Dgtk-wayland=false -Dgtk-x11=true ) \
+  && ls -la "$SRC"/zig-out/bin/ghostty \
+  || echo "GTK build failed — check blueprint-compiler version + system libs (docs/STATUS.md)."
+
 cat <<'EOF'
 
-libghostty-vt built. To build the GTK surface (Spike A) you also need
-blueprint-compiler + gettext, then (from the ghostty tree):
-  zig build -Dapp-runtime=gtk -Doptimize=ReleaseFast
-See docs/research/03b-ghostty-source-verified.md for the embedding plan.
+Done. Verified on the dev box: `ghostty +version` -> 1.3.2-HEAD-+5d0a82ba3 (X11, headless).
+Next (Spike A): wire Sources/CInsanitty to host Ghostty's GTK Application and construct a
+GhosttySurface. See docs/research/03b-ghostty-source-verified.md for the embedding plan.
 EOF
