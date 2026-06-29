@@ -31,7 +31,7 @@ DISPLAY="$DISP" XDG_CONFIG_HOME=/tmp/inscfg XDG_STATE_HOME="$XDG_STATE_HOME" INS
   dbus-run-session -- ./build/insanitty >/tmp/app-ccs.log 2>&1 & APP=$!
 sleep 7
 DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null
-grep -q 'tmux-cc: built 2-pane layout' /tmp/app-ccs.log \
+grep -q 'tmux-cc: window @.* → 2-pane layout' /tmp/app-ccs.log \
   || { echo "TMUX-CC-SPLIT E2E FAIL: insanitty did not build a 2-pane layout from the tmux window"; exit 1; }
 grep -q 'tmux-cc: attached' /tmp/app-ccs.log \
   || { echo "TMUX-CC-SPLIT E2E FAIL: control client did not attach"; exit 1; }
