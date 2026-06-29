@@ -20,7 +20,7 @@ Go 1.22, tmux 3.4, clang 18, Xvfb. 16 cores / 60 GiB RAM, x86_64 / glibc 2.39, h
 | Spike | State |
 |---|---|
 | **D — SplitTree on GtkPaned** | Substrate proven (GtkPaned tree builds/runs); `SplitGeometry` oracle constants ported + tested. Remaining: rebind the full `SplitTree` leaf type. |
-| **A — embed Ghostty GTK surface** | **Engine half done:** Ghostty's GTK frontend now **builds + runs here** (recipe below). Remaining: wire the real `Sources/CInsanitty` shim — host Ghostty's GTK `Application` and construct a `GhosttySurface` to parent into our chrome (replacing the placeholder). The shell + bridge API are already in place. |
+| **A — embed Ghostty GTK surface** | ✅ **DONE.** A live Ghostty terminal renders inside a Swift-hosted insanitty window (`docs/images/spike-a-embedded-terminal.png`). Built Ghostty's GTK apprt as `libghostty-gtk.so` with a 4-function C ABI (`patches/ghostty-gtk-embed.patch`, 103 insertions); the Swift host (`spikes/embed-a`) hosts Ghostty's `GApplication`, creates its own `AdwApplicationWindow`, and parents a live `GhosttySurface` running zsh. Verified headless on llvmpipe (EGL GL 3.2). See `ghostty-embed/`. |
 | **B — re-home inject_output/remote_grid patch** | Pending the GTK Ghostty build (A). The patch (`patches/ghostty-inject-output.patch`) is verified to apply at the pinned commit; bodies are renderer-agnostic. |
 | **C — msquic ↔ Go helper** | Pending: `msquic` not installed, and needs a LAN host running the helper. Bootstrap-line parser already ported + tested. |
 

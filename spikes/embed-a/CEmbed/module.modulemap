@@ -1,0 +1,4 @@
+module CEmbed [system] {
+    umbrella header "embed.h"
+    export *
+}

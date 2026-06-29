@@ -1,0 +1,150 @@
+diff --git a/build.zig b/build.zig
+index 8ef7701e2..5c41a5ad3 100644
+--- a/build.zig
++++ b/build.zig
+@@ -203,6 +203,33 @@ pub fn build(b: *std.Build) !void {
+         }
+     }
+ 
++    // insanitty: a GTK-apprt embedding library exposing a small C ABI so a host
++    // GTK4 app can host Ghostty's Application + create live terminal surfaces.
++    // Gated on -Dinsanitty-lib so the normal builds are untouched.
++    if (b.option(bool, "insanitty-lib", "Build the insanitty GTK embedding lib") orelse false) {
++        // shim_cfg inherits -Dapp-runtime=gtk from the CLI; apprt.zig maps a
++        // gtk-app-runtime library to the real GTK apprt (not embedded/Metal).
++        const shim_cfg = config;
++        const shim_deps = try buildpkg.SharedDeps.init(b, &shim_cfg);
++        const shim = b.addLibrary(.{
++            .name = "ghostty-gtk",
++            .linkage = .dynamic,
++            .root_module = b.createModule(.{
++                .root_source_file = b.path("src/insanitty_c_api.zig"),
++                .target = shim_cfg.target,
++                .optimize = shim_cfg.optimize,
++            }),
++            // Self-hosted x86_64 backend crashes on Ghostty (see GhosttyExe.zig).
++            .use_llvm = true,
++        });
++        _ = try shim_deps.add(shim);
++        b.installArtifact(shim);
++        b.getInstallStep().dependOn(&b.addInstallHeaderFile(
++            b.path("include/insanitty.h"),
++            "insanitty.h",
++        ).step);
++    }
++
+     // macOS only artifacts. These will error if they're initialized for
+     // other targets. In lib-vt mode emit_xcframework controls the lib-vt
+     // xcframework above, not this one.
+diff --git a/include/insanitty.h b/include/insanitty.h
+new file mode 100644
+index 000000000..b1dba5bfc
+--- /dev/null
++++ b/include/insanitty.h
+@@ -0,0 +1,15 @@
++#pragma once
++/* insanitty <-> Ghostty GTK embedding C ABI. See src/apprt/gtk/c_api.zig. */
++#include <gtk/gtk.h>
++
++/* Init libghostty + the GhosttyApplication; returns the process GApplication. */
++GApplication *insanitty_app_init(void);
++
++/* Create a live terminal surface widget (parent into any GtkWidget container). */
++GtkWidget *insanitty_surface_new(void);
++
++/* Run Ghostty's integrated loop (blocks; required for the terminal to render). */
++void insanitty_app_run(void);
++
++/* Request app shutdown. */
++void insanitty_app_quit(void);
+diff --git a/src/apprt.zig b/src/apprt.zig
+index c467f1801..cbf681cbf 100644
+--- a/src/apprt.zig
++++ b/src/apprt.zig
+@@ -44,7 +44,12 @@ pub const runtime = switch (build_config.artifact) {
+         .none => none,
+         .gtk => gtk,
+     },
+-    .lib => embedded,
++    // A library is normally the embedded (macOS/Metal) apprt, but the insanitty
++    // GTK embedding lib is a library that wants the real GTK apprt.
++    .lib => switch (build_config.app_runtime) {
++        .none => embedded,
++        .gtk => gtk,
++    },
+     .wasm_module => browser,
+ };
+ 
+diff --git a/src/build/SharedDeps.zig b/src/build/SharedDeps.zig
+index b68be92d0..8342687b4 100644
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -590,7 +590,9 @@ pub fn add(
+     }
+ 
+     // If we're building an exe then we have additional dependencies.
+-    if (step.kind != .lib) {
++    // (Also when building the insanitty GTK embedding lib, which needs the full
++    // GTK apprt deps even though it is a library.)
++    if (step.kind != .lib or self.config.app_runtime == .gtk) {
+         // We always statically compile glad
+         step.addIncludePath(b.path("vendor/glad/include/"));
+         step.addCSourceFile(.{
+diff --git a/src/insanitty_c_api.zig b/src/insanitty_c_api.zig
+new file mode 100644
+index 000000000..7457f37cb
+--- /dev/null
++++ b/src/insanitty_c_api.zig
+@@ -0,0 +1,52 @@
++//! Minimal C ABI to embed the Ghostty GTK terminal surface into a host GTK4
++//! application (insanitty). The host owns its window/chrome; this TU owns the
++//! libghostty App, the GhosttyApplication singleton, and the integrated run loop.
++//!
++//! Lives at src/ level (not under apprt/gtk/) so its module root is src/, matching
++//! the exe — Ghostty's files import across src/ and a deeper root rejects that.
++//! See docs/research/11-spikeA-embedding-plan.md.
++const std = @import("std");
++const glib = @import("glib");
++const gio = @import("gio");
++const gtk = @import("gtk");
++const state = &@import("global.zig").state;
++const CoreApp = @import("App.zig");
++const apprt = @import("apprt.zig");
++const Application = @import("apprt/gtk/class/application.zig").Application;
++const Surface = @import("apprt/gtk/class/surface.zig").Surface;
++
++var core_app: *CoreApp = undefined;
++var rt_app: apprt.App = undefined;
++
++/// Stand up global state, the core app, and the GhosttyApplication, and register
++/// it so Application.default() works and compiled-in resources resolve. Returns
++/// the GApplication* the host builds its AdwApplicationWindow from (null on error).
++export fn insanitty_app_init() ?*anyopaque {
++    state.init() catch return null;
++    core_app = CoreApp.create(state.alloc) catch return null;
++    rt_app.init(core_app, .{}) catch return null;
++    var err: ?*glib.Error = null;
++    if (rt_app.app.as(gio.Application).register(null, &err) == 0) {
++        if (err) |e| e.free();
++        return null;
++    }
++    return @ptrCast(rt_app.app.as(gio.Application));
++}
++
++/// Create a terminal surface widget. Parent it into any GtkWidget container; the
++/// terminal (pty + renderer) spawns lazily on first realize+resize. Returns GtkWidget*.
++export fn insanitty_surface_new() ?*anyopaque {
++    const surface = Surface.new(.none);
++    return @ptrCast(surface.as(gtk.Widget));
++}
++
++/// Run Ghostty's integrated event loop (pumps core_app.tick so the renderer draws).
++/// Blocks until quit.
++export fn insanitty_app_run() void {
++    rt_app.run() catch |e| std.log.err("insanitty run failed: {}", .{e});
++}
++
++/// Begin app shutdown from the host.
++export fn insanitty_app_quit() void {
++    rt_app.app.quit();
++}
