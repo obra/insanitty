@@ -48,8 +48,9 @@ import -window root "$OUT/e2e-1-typed-command.png" 2>/dev/null
 tmux capture-pane -t insanitty-ws-0 -p 2>/dev/null | grep -q "E2E-ALPHA-42" || fail "typed command did not run in the workspace's tmux session"
 echo "PASS scenario 1: command ran in the embedded shell (see $OUT/e2e-1-typed-command.png for the '42' output)"
 
-# Scenario 2: switch workspace (click sidebar row 2) and type in a different terminal.
-xdotool mousemove 110 112 click 1; sleep 2
+# Scenario 2: switch workspace (click sidebar row 2 — thumbnail rows are ~155px tall) and
+# type in a different terminal.
+xdotool mousemove 110 280 click 1; sleep 2
 type_in_terminal "echo E2E-BRAVO-on-second-workspace"
 import -window root "$OUT/e2e-2-second-workspace.png" 2>/dev/null
 tmux capture-pane -t insanitty-ws-1 -p 2>/dev/null | grep -q "E2E-BRAVO" || fail "second-workspace command did not run in its tmux session"

@@ -24,6 +24,21 @@ nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
 nonisolated(unsafe) var surfaces = Set<OpaquePointer>()
 
+/// One workspace's entry in the custom thumbnail sidebar (the "snapshots" feature).
+/// `livePaintable` is a GtkWidgetPaintable tracking the page; while a workspace is the
+/// visible one its thumbnail updates live, and we freeze it to a still image on switch-away.
+final class WorkspaceTile {
+    let page: OpaquePointer
+    let picture: OpaquePointer
+    let livePaintable: OpaquePointer
+    init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer) {
+        self.page = page; self.picture = picture; self.livePaintable = livePaintable
+    }
+}
+nonisolated(unsafe) var tiles: [WorkspaceTile] = []
+nonisolated(unsafe) var sidebarList: OpaquePointer?
+nonisolated(unsafe) var currentWorkspace = 0
+
 /// A live terminal pane that expands to fill its slot. If `command` is given, the surface
 /// runs it instead of the default shell (used for tmux-backed workspaces).
 func makeTerminal(_ command: String? = nil) -> OpaquePointer? {
@@ -109,14 +124,62 @@ func currentTabView() -> OpaquePointer? {
 /// New terminal tab in the current workspace.
 func newTabInCurrentWorkspace() { addTab(to: currentTabView()) }
 
-/// Create a new tmux-backed workspace and switch to it.
+/// Add a workspace page to the stack and a live-thumbnail row to the custom sidebar.
+@discardableResult
+func registerWorkspace(_ page: OpaquePointer, name: String, id: String) -> Int {
+    guard let stack = mainStack, let list = sidebarList else { return -1 }
+    gtk_stack_add_named(P(stack), P(page), id)
+
+    let paintable = OP(gtk_widget_paintable_new(P(page)))!
+    let pic = OP(gtk_picture_new())!
+    gtk_picture_set_paintable(P(pic), P(paintable))
+    gtk_picture_set_content_fit(P(pic), GTK_CONTENT_FIT_CONTAIN)
+    gtk_widget_set_size_request(P(pic), 188, 116)
+
+    let frame = OP(gtk_frame_new(nil))!
+    gtk_frame_set_child(P(frame), P(pic))
+
+    let label = OP(gtk_label_new(name))!
+    gtk_widget_set_halign(P(label), GTK_ALIGN_START)
+    gtk_label_set_ellipsize(P(label), PANGO_ELLIPSIZE_END)
+
+    let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4))!
+    gtk_widget_set_margin_top(P(box), 6); gtk_widget_set_margin_bottom(P(box), 6)
+    gtk_widget_set_margin_start(P(box), 8); gtk_widget_set_margin_end(P(box), 8)
+    gtk_box_append(P(box), P(frame))
+    gtk_box_append(P(box), P(label))
+
+    let row = OP(gtk_list_box_row_new())!
+    gtk_list_box_row_set_child(P(row), P(box))
+    gtk_list_box_append(P(list), P(row))
+
+    tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable))
+    return tiles.count - 1
+}
+
+/// Switch to workspace `idx`: freeze the outgoing thumbnail to a still image and put the
+/// incoming workspace's live paintable back, so the visible workspace always updates live.
+func selectWorkspace(_ idx: Int) {
+    guard idx >= 0, idx < tiles.count, let stack = mainStack else { return }
+    if idx != currentWorkspace, currentWorkspace >= 0, currentWorkspace < tiles.count {
+        let out = tiles[currentWorkspace]
+        if let frozen = OP(gdk_paintable_get_current_image(P(out.livePaintable))) {
+            gtk_picture_set_paintable(P(out.picture), P(frozen))
+            g_object_unref(raw(frozen))
+        }
+    }
+    gtk_stack_set_visible_child(P(stack), P(tiles[idx].page))
+    gtk_picture_set_paintable(P(tiles[idx].picture), P(tiles[idx].livePaintable))
+    currentWorkspace = idx
+}
+
+/// Create a new tmux-backed workspace and switch to it (Ctrl+N).
 func addWorkspace() {
-    guard let stack = mainStack else { return }
+    guard let list = sidebarList, let page = makeWorkspacePage(index: workspaceCounter) else { return }
     let idx = workspaceCounter
     workspaceCounter += 1
-    let page = makeWorkspacePage(index: idx)
-    gtk_stack_add_titled(P(stack), P(page), "ws\(idx)", WorkspaceName.generate())
-    gtk_stack_set_visible_child(P(stack), P(page))
+    let tileIdx = registerWorkspace(page, name: WorkspaceName.generate(), id: "ws\(idx)")
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(tileIdx)))))
 }
 
 /// New WebKitGTK browser tab in the current workspace (Fantastty has browser tabs).
@@ -207,6 +270,12 @@ let injectGridIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ 
     return 0 // G_SOURCE_REMOVE
 }
 
+/// Sidebar row selected → switch to that workspace.
+let rowSelectedCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, rowPtr, _ in
+    guard let rowPtr = rowPtr else { return }
+    selectWorkspace(Int(gtk_list_box_row_get_index(P(rowPtr))))
+}
+
 func buildWindow() {
     let win = OP(adw_application_window_new(P(gapp)))
     mainWindow = win
@@ -218,17 +287,26 @@ func buildWindow() {
     gtk_stack_set_transition_type(P(stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE)
     gtk_widget_set_hexpand(P(stack), 1)
     gtk_widget_set_vexpand(P(stack), 1)
-    for i in 0..<3 {
-        gtk_stack_add_titled(P(stack), P(makeWorkspacePage(index: i)), "ws\(i)", WorkspaceName.generate())
-    }
-    gtk_stack_add_titled(P(stack), P(makeRemoteWorkspacePage()), "remote", "remote (QUIC)")
 
-    let sidebar = OP(gtk_stack_sidebar_new())
-    gtk_stack_sidebar_set_stack(P(sidebar), P(stack))
-    gtk_widget_set_size_request(P(sidebar), 220, -1)
+    // Custom sidebar: a scrollable list of live workspace thumbnails (the "snapshots" feature).
+    let list = OP(gtk_list_box_new())
+    sidebarList = list
+    gtk_list_box_set_selection_mode(P(list), GTK_SELECTION_SINGLE)
+    g_signal_connect_data(raw(list), "row-selected", unsafeBitCast(rowSelectedCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+
+    for i in 0..<3 {
+        registerWorkspace(makeWorkspacePage(index: i)!, name: WorkspaceName.generate(), id: "ws\(i)")
+    }
+    registerWorkspace(makeRemoteWorkspacePage()!, name: "remote (QUIC)", id: "remote")
+
+    let sidebarScroll = OP(gtk_scrolled_window_new())
+    gtk_scrolled_window_set_policy(P(sidebarScroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC)
+    gtk_scrolled_window_set_child(P(sidebarScroll), P(list))
+    gtk_widget_set_size_request(P(sidebarScroll), 220, -1)
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), 0))))
 
     let content = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0))
-    gtk_box_append(P(content), P(sidebar))
+    gtk_box_append(P(content), P(sidebarScroll))
     gtk_box_append(P(content), P(OP(gtk_separator_new(GTK_ORIENTATION_VERTICAL))))
     gtk_box_append(P(content), P(stack))
 

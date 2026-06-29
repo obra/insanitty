@@ -41,7 +41,7 @@ The sections below are the unvarnished detail.
 
 | Fantastty | insanitty | Notes |
 |---|---|---|
-| **Sidebar snapshots** — each sidebar tab shows a **live thumbnail** of its content: terminal rendered to an image (`TerminalThumbnailRenderer`), browser via `WKSnapshotConfiguration`. The active session updates live (debounced 150 ms); inactive tabs show the last snapshot (`SidebarThumbnailView.swift`). | **ABSENT** (building) | GTK plan: `GtkWidgetPaintable` of the live surface for the active workspace + a captured `GdkTexture` for inactive ones, shown via `GtkPicture` in custom sidebar rows. |
+| **Sidebar snapshots** — each sidebar tab shows a **live thumbnail** of its content: terminal rendered to an image (`TerminalThumbnailRenderer`), browser via `WKSnapshotConfiguration`. The active session updates live (debounced 150 ms); inactive tabs show the last snapshot (`SidebarThumbnailView.swift`). | **REAL** (`registerWorkspace`/`selectWorkspace`, `app/main.swift`) | Custom `GtkListBox` sidebar; each workspace row is a `GtkPicture` of a `GtkWidgetPaintable` of the page — live for the active workspace, frozen to a `gdk_paintable_get_current_image` still on switch-away. Verified capturing the embedded Ghostty GL surface (`docs/images/sidebar-snapshots.png`). |
 | **Workspace overview** — Exposé-style `LazyVGrid` of every tab in a workspace with live snapshots, hover-zoom, and click-to-select; adaptive column count (`WorkspaceOverviewView.swift`). | **ABSENT** (building) | GTK plan: a `GtkFlowBox` of paintable tiles, click to select. |
 | **Browser tabs** — real WebKit view with navigation + persisted URL. | **DEMO → building real** | Add an address bar + `webkit_web_view_load_uri` + back/forward to the existing WebKitGTK view. |
 
