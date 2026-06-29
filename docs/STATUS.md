@@ -3,9 +3,10 @@
 What is actually built and verified, vs. what's pending. Updated as Phase 0 progresses.
 
 > **For an honest, source-grounded comparison to macOS Fantastty, see [PARITY.md](PARITY.md).**
-> insanitty has a real terminal-workspace-manager core but is **not** at feature parity:
-> the remote engine in the GUI, full tmux control-mode, session/layout persistence,
-> integrations, settings, theming, sidebar snapshots, and overview are demo/stub/absent.
+> insanitty has a real terminal-workspace-manager core — terminals, splits, tabs, tmux
+> persistence, **sidebar snapshots, workspace overview, and real browser tabs** — but is
+> **not** yet at full parity: the remote engine in the GUI, full tmux control-mode,
+> session/layout persistence, integrations, settings, and theming are demo/stub/absent.
 
 ## Native QUIC transport + packaging (2026-06-29)
 
@@ -52,10 +53,12 @@ counter kept advancing while the app was dead, relaunches, and confirms the work
 headline "sessions survive restart" feature, robustly verified (a process outlived the app).
 
 Features working (Fantastty's full structure — workspace → tabs → splits → panes):
-workspaces (sidebar + switching), **terminal + browser tabs** (Ctrl+T / Ctrl+B; AdwTabView +
-WebKitGTK — `docs/images/e2e-6-browser.png`), **splits** (Ctrl+D right / Ctrl+Shift+D down,
-focus-aware), **tmux-backed persistent sessions**, live terminals with interactive I/O.
-Screenshots in `docs/images/`.
+workspaces (sidebar + switching), **terminal tabs** (Ctrl+T) + **real browser tabs**
+(Ctrl+B; nav bar + address bar over WebKitGTK — `docs/images/e2e-6-browser.png`), **splits**
+(Ctrl+D right / Ctrl+Shift+D down, focus-aware), **tmux-backed persistent sessions**, live
+terminals with interactive I/O, **live sidebar snapshots** of each workspace
+(`docs/images/sidebar-snapshots.png`), and an **Exposé workspace overview** (Ctrl+O / header
+grid button — `docs/images/overview.png`). Screenshots in `docs/images/`.
 **Remote feature set — works end-to-end locally** (`scripts/e2e-remote-engine.sh`, PASS).
 The Go helper (Fantastty's, reused unchanged) builds here with libghostty-vt (Go 1.25,
 `scripts/build-remote-helper.sh`) and serves QUIC on 127.0.0.1 — **localhost is the host**, so
