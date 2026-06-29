@@ -16,9 +16,13 @@ Xvfb + matchbox WM + `dbus-run-session`) and **passes**:
   `…-42` (`docs/images/e2e-1-typed-command.png`). Real input→pty→shell→render round-trip.
 - **Scenario 2** — switched to a second workspace and typed in its own live terminal
   (`docs/images/e2e-2-second-workspace.png`).
+- **Scenario 3** — `Ctrl+D` **split** the terminal into two independent live shells side by side
+  (GtkPaned divider); typed a different command in each (`docs/images/e2e-3-split.png`).
 
-Screenshots: `docs/images/{insanitty-app,e2e-1-typed-command,e2e-2-second-workspace}.png`.
-Not yet: tabs, splits, tmux-backed persistence, notes/URLs, the remote engine (Spike C / msquic).
+Features working: workspaces (sidebar + switching), live terminals, **splits** (Ctrl+D right /
+Ctrl+Shift+D down, focus-aware). Screenshots in `docs/images/`.
+Not yet: tabs, tmux-backed persistence, notes/URLs/Linear/sprites/browser, the remote engine
+(Spike C / msquic — needs a build + a LAN host, can't be fully e2e-tested headless here).
 
 ## Verified on the dev box (2026-06-29)
 

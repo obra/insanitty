@@ -52,4 +52,12 @@ import -window root "$OUT/e2e-2-second-workspace.png" 2>/dev/null
 grep -q "E2E-BRAVO" /tmp/app-e2e.log || fail "second-workspace command did not reach a shell"
 echo "PASS scenario 2: second workspace has its own live terminal"
 
+# Scenario 3: split the terminal (Ctrl+D) and type in the new pane.
+xdotool key ctrl+d; sleep 3
+xdotool mousemove 850 400 click 1; sleep 1
+xdotool type --delay 60 "echo E2E-SPLIT-pane"; sleep 0.4; xdotool key Return; sleep 3
+import -window root "$OUT/e2e-3-split.png" 2>/dev/null
+grep -q "E2E-SPLIT-pane" /tmp/app-e2e.log || fail "split-pane command did not reach a shell"
+echo "PASS scenario 3: Ctrl+D split into a second independent live terminal"
+
 echo "E2E PASS"
