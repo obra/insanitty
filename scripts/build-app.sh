@@ -21,7 +21,7 @@ echo "Compiling insanitty (swiftc $($SWIFTC --version 2>/dev/null | head -1))...
   -I app/CGhostty -I "$INCDIR" \
   $(pkg-config --cflags-only-I libadwaita-1 webkitgtk-6.0 | sed 's/-I/-Xcc -I/g') \
   Sources/InsanittyCore/*.swift app/*.swift \
-  -L "$LIBDIR" -lghostty-gtk \
+  -L "$LIBDIR" -lghostty-gtk -lutil \
   $(pkg-config --libs libadwaita-1 webkitgtk-6.0 | tr ' ' '\n' | grep -E '^-[lL]' | tr '\n' ' ') \
   -Xlinker -rpath -Xlinker "$RPATH" \
   -o build/insanitty

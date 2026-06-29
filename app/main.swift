@@ -43,6 +43,8 @@ nonisolated(unsafe) var sidebarList: OpaquePointer?
 nonisolated(unsafe) var currentWorkspace = 0
 nonisolated(unsafe) var overviewBox: OpaquePointer?   // Exposé overlay (hidden until toggled)
 nonisolated(unsafe) var overviewFlow: OpaquePointer?  // the GtkFlowBox of workspace tiles
+nonisolated(unsafe) var ctrlClient: TmuxControlClient?   // live tmux -CC client (demo workspace)
+nonisolated(unsafe) var ctrlPaneSurfaces: [Int: OpaquePointer] = [:]  // tmux pane id → surface
 
 /// A live terminal pane that expands to fill its slot. If `command` is given, the surface
 /// runs it instead of the default shell (used for tmux-backed workspaces).
@@ -382,6 +384,54 @@ func makeRemoteWorkspacePage() -> OpaquePointer? {
     return vbox
 }
 
+/// Run a shell command to completion (used to ensure the tmux control session exists).
+func runDetached(_ command: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    p.arguments = ["-c", command]
+    p.standardError = FileHandle.nullDevice
+    try? p.run(); p.waitUntilExit()
+}
+
+/// A silent terminal surface: its shell discards input and emits nothing, so the surface renders
+/// ONLY bytes injected into it — used as a tmux control-mode pane.
+func makeSilentTerminal() -> OpaquePointer? {
+    makeTerminal("stty raw -echo 2>/dev/null; exec cat >/dev/null")
+}
+
+/// A "tmux -CC" workspace: insanitty owns the `tmux -CC` control session and renders its pane by
+/// injecting the control protocol's %output into a silent surface (TmuxControlClient). A live
+/// demonstration of tmux control mode; env-gated (INSANITTY_TMUX_CC) so it stays out of the way.
+func makeControlModeWorkspacePage() -> OpaquePointer? {
+    runDetached("tmux new-session -A -d -s insanitty-cc")
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
+    let tabView = OP(adw_tab_view_new())!
+    gtk_widget_set_vexpand(P(tabView), 1)
+    let tabBar = OP(adw_tab_bar_new())!
+    adw_tab_bar_set_view(P(tabBar), P(tabView))
+    gtk_box_append(P(vbox), P(tabBar))
+    gtk_box_append(P(vbox), P(tabView))
+
+    let term = makeSilentTerminal()!
+    let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
+    gtk_box_append(P(box), P(term))
+    let page = OP(adw_tab_view_append(P(tabView), P(box)))!
+    adw_tab_page_set_title(P(page), "tmux -CC")
+
+    let client = TmuxControlClient(session: "insanitty-cc")
+    client.surfaceForPane = { pane in
+        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = term }
+        return ctrlPaneSurfaces[pane]
+    }
+    ctrlClient = client
+    // Start once the surface has realized; the client then injects tmux output into it.
+    let startCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
+        ctrlClient?.start(); return 0
+    }
+    g_timeout_add(1500, startCb, nil)
+    return vbox
+}
+
 /// Fetch the remote pane grid from the helper (over QUIC) on a background thread, then paint it
 /// into the surface on the GTK main thread (`g_idle_add`). Fetching off the main loop keeps the
 /// UI responsive while the helper completes its QUIC handshake — a synchronous fetch here would
@@ -471,12 +521,20 @@ func buildWindow() {
     }
     // The "remote (QUIC)" demo is always present and never persisted.
     registerWorkspace(makeRemoteWorkspacePage()!, name: "remote (QUIC)", id: "remote", index: -1)
+    // Optional live tmux control-mode demo workspace (kept out of normal launches).
+    if ProcessInfo.processInfo.environment["INSANITTY_TMUX_CC"] != nil {
+        registerWorkspace(makeControlModeWorkspacePage()!, name: "tmux -CC", id: "ctrl", index: -2)
+    }
 
     let sidebarScroll = OP(gtk_scrolled_window_new())
     gtk_scrolled_window_set_policy(P(sidebarScroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC)
     gtk_scrolled_window_set_child(P(sidebarScroll), P(list))
     gtk_widget_set_size_request(P(sidebarScroll), 220, -1)
-    let selPos = tiles.firstIndex(where: { $0.index == (saved?.selected ?? 0) }) ?? 0
+    var selPos = tiles.firstIndex(where: { $0.index == (saved?.selected ?? 0) }) ?? 0
+    // When the tmux -CC demo is enabled, open on it so it realizes immediately.
+    if ProcessInfo.processInfo.environment["INSANITTY_TMUX_CC"] != nil, let last = tiles.indices.last {
+        selPos = last
+    }
     gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(selPos)))))
 
     let content = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0))
