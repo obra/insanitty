@@ -19,9 +19,15 @@ Xvfb + matchbox WM + `dbus-run-session`) and **passes**:
 - **Scenario 3** — `Ctrl+D` **split** the terminal into two independent live shells side by side
   (GtkPaned divider); typed a different command in each (`docs/images/e2e-3-split.png`).
 
-Features working: workspaces (sidebar + switching), live terminals, **splits** (Ctrl+D right /
-Ctrl+Shift+D down, focus-aware). Screenshots in `docs/images/`.
-Not yet: tabs, tmux-backed persistence, notes/URLs/Linear/sprites/browser, the remote engine
+- **Scenario 4** — `Ctrl+T` opened a new **tab** (AdwTabView) with its own live terminal
+  (`docs/images/e2e-4-tabs.png`).
+
+Features working (Fantastty's full structure — workspace → tabs → splits → panes):
+workspaces (sidebar + switching), **tabs** (Ctrl+T, AdwTabBar/AdwTabView), **splits**
+(Ctrl+D right / Ctrl+Shift+D down, focus-aware), live terminals with interactive I/O.
+Screenshots in `docs/images/`.
+Not yet: tmux-backed persistence (the headline "survive restart" feature — needs Spike B +
+the tmux control-mode client port), notes/URLs/Linear/sprites/browser, the remote engine
 (Spike C / msquic — needs a build + a LAN host, can't be fully e2e-tested headless here).
 
 ## Verified on the dev box (2026-06-29)

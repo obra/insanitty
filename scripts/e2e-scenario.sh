@@ -60,4 +60,12 @@ import -window root "$OUT/e2e-3-split.png" 2>/dev/null
 grep -q "E2E-SPLIT-pane" /tmp/app-e2e.log || fail "split-pane command did not reach a shell"
 echo "PASS scenario 3: Ctrl+D split into a second independent live terminal"
 
+# Scenario 4: new tab (Ctrl+T) with its own terminal.
+xdotool key ctrl+t; sleep 4
+xdotool mousemove 650 400 click 1; sleep 1
+xdotool type --delay 60 "echo E2E-TAB-two"; sleep 0.4; xdotool key Return; sleep 3
+import -window root "$OUT/e2e-4-tabs.png" 2>/dev/null
+grep -q "E2E-TAB-two" /tmp/app-e2e.log || fail "new-tab command did not reach a shell"
+echo "PASS scenario 4: Ctrl+T new tab with its own live terminal"
+
 echo "E2E PASS"

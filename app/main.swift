@@ -15,6 +15,7 @@ import Glibc
 
 nonisolated(unsafe) var gapp: OpaquePointer?
 nonisolated(unsafe) var mainWindow: OpaquePointer?
+nonisolated(unsafe) var mainStack: OpaquePointer?
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
 nonisolated(unsafe) var surfaces = Set<OpaquePointer>()
 
@@ -73,11 +74,39 @@ func splitFocused(_ orientation: GtkOrientation) {
     }
 }
 
-/// One workspace page: a box wrapping a single terminal (which can later split).
-func makeWorkspacePage() -> OpaquePointer? {
+/// A tab's content root: a box wrapping a terminal (which can split into a GtkPaned tree).
+func makeSplitRoot() -> OpaquePointer? {
     let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
     gtk_box_append(P(box), P(makeTerminal()))
     return box
+}
+
+/// Add a terminal tab to a workspace's AdwTabView and select it.
+func addTab(to tabView: OpaquePointer?) {
+    let page = OP(adw_tab_view_append(P(tabView), P(makeSplitRoot())))
+    adw_tab_page_set_title(P(page), "Terminal")
+    adw_tab_view_set_selected_page(P(tabView), P(page))
+}
+
+/// New tab in the currently visible workspace (its AdwTabView is the page box's last child).
+func newTabInCurrentWorkspace() {
+    guard let stack = mainStack,
+          let page = OP(gtk_stack_get_visible_child(P(stack))),
+          let tabView = OP(gtk_widget_get_last_child(P(page))) else { return }
+    addTab(to: tabView)
+}
+
+/// One workspace page: a tab bar over an AdwTabView of terminal tabs.
+func makeWorkspacePage() -> OpaquePointer? {
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
+    let tabView = OP(adw_tab_view_new())
+    gtk_widget_set_vexpand(P(tabView), 1)
+    let tabBar = OP(adw_tab_bar_new())
+    adw_tab_bar_set_view(P(tabBar), P(tabView))
+    gtk_box_append(P(vbox), P(tabBar))
+    gtk_box_append(P(vbox), P(tabView))
+    addTab(to: tabView) // initial tab
+    return vbox
 }
 
 func buildWindow() {
@@ -87,6 +116,7 @@ func buildWindow() {
     gtk_window_set_title(P(win), "insanitty")
 
     let stack = OP(gtk_stack_new())
+    mainStack = stack
     gtk_stack_set_transition_type(P(stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE)
     gtk_widget_set_hexpand(P(stack), 1)
     gtk_widget_set_vexpand(P(stack), 1)
@@ -116,6 +146,10 @@ func buildWindow() {
         let shift = (state.rawValue & GDK_SHIFT_MASK.rawValue) != 0
         if ctrl && (keyval == GDK_KEY_d || keyval == GDK_KEY_D) {
             splitFocused(shift ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL)
+            return 1
+        }
+        if ctrl && (keyval == GDK_KEY_t || keyval == GDK_KEY_T) {
+            newTabInCurrentWorkspace()
             return 1
         }
         return 0
