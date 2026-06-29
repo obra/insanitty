@@ -4,9 +4,10 @@ What is actually built and verified, vs. what's pending. Updated as Phase 0 prog
 
 > **For an honest, source-grounded comparison to macOS Fantastty, see [PARITY.md](PARITY.md).**
 > insanitty has a real terminal-workspace-manager core — terminals, splits, tabs, tmux
-> persistence, **sidebar snapshots, workspace overview, and real browser tabs** — but is
-> **not** yet at full parity: the remote engine in the GUI, full tmux control-mode,
-> session/layout persistence, integrations, settings, and theming are demo/stub/absent.
+> persistence, **sidebar snapshots, workspace overview, real browser tabs, and session/layout
+> persistence** — but is **not** yet at full parity. **Interactive tmux control mode** works for
+> a single pane (env-gated demo); multi-pane→splits is pending. The remote engine in the GUI,
+> integrations, settings, and theming remain demo/stub/absent.
 
 ## Native QUIC transport + packaging (2026-06-29)
 
