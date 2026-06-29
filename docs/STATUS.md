@@ -93,9 +93,9 @@ Go 1.22, tmux 3.4, clang 18, Xvfb. 16 cores / 60 GiB RAM, x86_64 / glibc 2.39, h
 |---|---|
 | **Swift on Linux** | ✅ Swift 6.3.2 compiles; Foundation/Codable work; `swift test` = **11/11 passing** (ported `WorkspaceName`, `RemoteBootstrapLine`, `SplitGeometry`). |
 | **Ghostty engine builds (Zig)** | ✅ `zig build -Demit-lib-vt` → `libghostty-vt.so`. **And the full GTK frontend builds + runs**: `zig build -Doptimize=Debug -Dgtk-wayland=false -Dgtk-x11=true` → a 150 MB `ghostty` binary linking libgtk-4 + libadwaita-1; `ghostty +version` prints `1.3.2-HEAD-+5d0a82ba3` headless under Xvfb. The entire engine-reuse path (incl. the `GhosttySurface` widget) compiles on this box. |
-| **Swift ↔ GTK4/libadwaita interop** | ✅ `spike-gtk-smoke` and the `insanitty` app shell **compile, link, and run headless under Xvfb**: GTK init, `AdwStyleManager`, a real `GtkPaned` widget tree, an `AdwApplicationWindow` with sidebar + split. (This validates report `10`'s recommended "Swift + direct C interop" approach.) |
+| **Swift ↔ GTK4/libadwaita interop** | ✅ The real `app/` (built by `scripts/build-app.sh`) **compiles, links, and runs headless under Xvfb**: GTK init, a `GtkPaned` widget tree, an `AdwApplicationWindow` with a thumbnail sidebar + splits + tabs. (Validated report `10`'s "Swift + direct C interop" approach; the early `spike-gtk-smoke` that first proved this was retired once `app/` superseded it.) |
 | **SwiftPM + pkg-config** | ✅ builds; SwiftPM strips the stray `-mfpmath=sse`/`-pthread` cflags (warnings only). |
-| **App shell skeleton** | ✅ `INSANITTY_SMOKE=1 xvfb-run -a .build/debug/insanitty` opens the window (sidebar of generated workspace names + split placeholders) and self-quits, exit 0. |
+| **App shell** | ✅ The real `app/` opens its window (thumbnail sidebar of generated workspace names + live terminals) under Xvfb; `scripts/e2e-scenario.sh` drives it end to end. (The Phase-0 `INSANITTY_SMOKE` stub that first stood in here was removed once the real app shipped.) |
 
 ## Phase-0 spike status
 

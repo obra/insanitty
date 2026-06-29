@@ -1,28 +1,17 @@
 name: ci
+# Fast gate on every push/PR: build + test the portable logic library (InsanittyCore).
+# It is pure Foundation (no GTK), so this needs only a Swift toolchain. The real GTK app and
+# its headless GUI e2e are built/run by deb.yml (which does the ~1h Ghostty engine build).
 on:
   push:
     branches: [main, linux-port]
   pull_request:
 
 jobs:
-  build-test:
+  core-tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: System dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential pkg-config xvfb \
-            libgtk-4-dev libadwaita-1-dev
-
-      - name: Install Zig 0.15.2
-        run: |
-          curl -fsSL -o /tmp/zig.tar.xz \
-            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
-          mkdir -p "$HOME/.local/zig" && tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
-          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
 
       - name: Install Swift (swiftly)
         run: |
@@ -31,22 +20,9 @@ jobs:
           SWIFTLY_HOME_DIR="$HOME/.local/swiftly" SWIFTLY_BIN_DIR="$HOME/.local/bin" \
             /tmp/swiftly-bin/swiftly init --assume-yes --skip-install --quiet-shell-followup
           "$HOME/.local/bin/swiftly" install latest --assume-yes
-          TC=$(find "$HOME/.local/share/swiftly/toolchains" -maxdepth 3 -type d -name bin | head -1)
-          echo "$TC" >> "$GITHUB_PATH"
+          echo "$(dirname "$(find "$HOME/.local/share/swiftly/toolchains" -name swiftc | head -1)")" >> "$GITHUB_PATH"
 
-      - name: Build
-        run: swift build
-
-      - name: Test
-        run: swift test
-
-      - name: Headless smoke (GTK interop + app shell)
+      - name: Build + test InsanittyCore
         run: |
           swift build
-          xvfb-run -a .build/debug/spike-gtk-smoke
-          INSANITTY_SMOKE=1 xvfb-run -a .build/debug/insanitty
-
-      # Engine toolchain check — builds libghostty-vt (no GTK/blueprint needed).
-      - name: Build libghostty-vt
-        run: ZIG="$HOME/.local/zig/zig" ./scripts/build-ghostty.sh
-        continue-on-error: true
+          swift test

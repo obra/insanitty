@@ -101,12 +101,13 @@ and not the full Fantastty `AppCommands` set.
 
 ## Build / CI honesty
 
-- **Two apps in the tree.** `Sources/insanitty/` (built by `swift build`, uses the
-  `Sources/CInsanitty/ghostty_stub.c` **placeholder** backend) is a Phase-0 skeleton;
-  `app/` (built by `scripts/build-app.sh`, links the real `libghostty-gtk.so`) is the
-  real app. **`ci.yml` builds/smoke-tests the stub**; only `deb.yml` builds the real app,
-  and it runs **no** GUI/e2e test. Every "e2e … PASS" is a manual local result, not
-  continuously verified. *(Proposed cleanup pending Jesse's call — see below.)*
+- **One app now.** The Phase-0 stub (`Sources/insanitty` + the `ghostty_stub.c` placeholder
+  backend + `spike-gtk-smoke` + `CAdw`) was removed. SwiftPM builds only the portable,
+  GTK-free logic library (`InsanittyCore`) + tests; the real GTK app is `app/`, built by
+  `scripts/build-app.sh`. **`ci.yml`** builds/tests `InsanittyCore` (fast, hard gate);
+  **`deb.yml`** builds the real app + `.deb` and drives it through the headless GUI e2e
+  (`e2e-scenario` + `e2e-layout-persistence`) — provisional (continue-on-error) until the
+  software-GL/WM/dbus path is confirmed on a GitHub runner. The e2e suites pass locally on llvmpipe.
 - Ghostty is **not vendored** (no submodule); `build-ghostty.sh` clones it. The shipped
   `.deb` bundles the built libs, so the installed app is self-contained, but building
   from source still requires the ~1h Ghostty GTK build.
@@ -129,5 +130,6 @@ Ordered by how much each gap shapes the product:
    real Linear client; decide whether sprites are in scope.
 5. **Settings + theming** — a preferences surface and theme/appearance selection.
 6. **Browser** — address bar + navigation + URL persistence.
-7. **Real CI coverage** — build `app/` and run the e2e scripts headless in CI; retire or
-   clearly quarantine the stub app.
+7. ~~**Real CI coverage** — build `app/` and run the e2e scripts headless in CI; retire the
+   stub app.~~ **Done** — stub removed; `ci.yml` tests `InsanittyCore`, `deb.yml` builds the
+   real app + runs the GUI e2e (provisional until confirmed on a runner).

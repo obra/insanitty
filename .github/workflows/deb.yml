@@ -72,3 +72,14 @@ jobs:
         with:
           name: insanitty-deb
           path: dist/*.deb
+
+      # Drive the REAL app through its UI headless (Xvfb + matchbox + dbus, software GL).
+      # Provisional (continue-on-error) until the software-GL/WM/dbus path is confirmed on a
+      # GitHub runner — it passes locally on llvmpipe. The portable-logic gate is ci.yml.
+      - name: Headless GUI e2e (real app)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y xvfb matchbox-window-manager x11-utils xdotool imagemagick dbus-x11 tmux python3
+          export GHOSTTY="$RUNNER_TEMP/ghostty" LD_LIBRARY_PATH="$RUNNER_TEMP/ghostty/zig-out/lib"
+          ./scripts/e2e-scenario.sh
+          ./scripts/e2e-layout-persistence.sh
