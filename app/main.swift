@@ -155,7 +155,19 @@ func focusedSurface(from start: OpaquePointer?) -> OpaquePointer? {
 }
 
 /// Split the focused terminal: replace it with a GtkPaned holding it + a new terminal.
+/// The ControlModeWorkspace of the currently selected workspace, if it is tmux-backed.
+func currentControlWorkspace() -> ControlModeWorkspace? {
+    guard currentWorkspace >= 0, currentWorkspace < tiles.count else { return nil }
+    return controlWorkspaces[tiles[currentWorkspace].index]
+}
+
 func splitFocused(_ orientation: GtkOrientation) {
+    // Control-mode workspaces split via tmux (`split-window`); the %layout-change response rebuilds
+    // the pane tree, so the split is a real tmux pane that persists across restarts.
+    if let cw = currentControlWorkspace(), let pane = cw.client.inputPane {
+        cw.client.send("split-window -t %\(pane) -\(orientation == GTK_ORIENTATION_VERTICAL ? "v" : "h")")
+        return
+    }
     guard let win = mainWindow,
           let focus = OP(gtk_window_get_focus(P(win))),
           let surface = focusedSurface(from: focus),
@@ -207,7 +219,11 @@ func currentTabView() -> OpaquePointer? {
 }
 
 /// New terminal tab in the current workspace.
-func newTabInCurrentWorkspace() { addTab(to: currentTabView()) }
+func newTabInCurrentWorkspace() {
+    // Control-mode workspaces add a tab via a tmux window (`new-window`); %window-add builds the tab.
+    if let cw = currentControlWorkspace() { cw.client.send("new-window"); return }
+    addTab(to: currentTabView())
+}
 
 /// Add a workspace page to the stack and a live-thumbnail row to the custom sidebar.
 @discardableResult
@@ -501,15 +517,9 @@ func newBrowserTabInCurrentWorkspace() {
 /// backed by a per-workspace tmux session (`tmux new-session -A -s insanitty-ws-N`), so its
 /// shell + scrollback + running programs survive app restarts ("persistent sessions").
 func makeWorkspacePage(index: Int) -> OpaquePointer? {
-    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
-    let tabView = OP(adw_tab_view_new())
-    gtk_widget_set_vexpand(P(tabView), 1)
-    let tabBar = OP(adw_tab_bar_new())
-    adw_tab_bar_set_view(P(tabBar), P(tabView))
-    gtk_box_append(P(vbox), P(tabBar))
-    gtk_box_append(P(vbox), P(tabView))
-    addTab(to: tabView, command: "tmux new-session -A -s insanitty-ws-\(index)")
-    return vbox
+    // Every workspace is a tmux control-mode session: tmux windows → tabs, tmux panes → splits,
+    // so the within-workspace layout is owned by tmux and restored on relaunch.
+    makeControlModeWorkspacePage(session: "insanitty-ws-\(index)", index: index)
 }
 
 /// An inert surface for a remote pane: rendered only by injected output (no shell of its own).
