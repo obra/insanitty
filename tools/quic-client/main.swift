@@ -64,10 +64,24 @@ let connCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?, UnsafeMuta
 }
 
 let args = CommandLine.arguments
-guard args.count == 5, let port = UInt16(args[2]) else {
-    FileHandle.standardError.write(Data("usage: quic-client <host> <port> <session> <key>\n".utf8)); exit(2)
+let host: String
+let port: UInt16
+let session: String
+let key: String
+if args.count == 2, args[1] == "--bootstrap" {
+    // Parse the helper's `FANTASTTY_REMOTE …` bootstrap line from stdin — the production path
+    // (launch-or-resume prints this line), using the tested InsanittyCore parser.
+    guard let line = readLine(strippingNewline: true),
+          let boot = try? RemoteBootstrapLine.parse(line) else {
+        FileHandle.standardError.write(Data("quic-client: could not parse FANTASTTY_REMOTE bootstrap line from stdin\n".utf8)); exit(2)
+    }
+    host = boot.host; port = boot.port; session = boot.session; key = boot.key
+} else if args.count == 5, let p = UInt16(args[2]) {
+    host = args[1]; port = p; session = args[3]; key = args[4]
+} else {
+    FileHandle.standardError.write(Data("usage: quic-client <host> <port> <session> <key>  |  quic-client --bootstrap  (FANTASTTY_REMOTE line on stdin)\n".utf8)); exit(2)
 }
-gAttach = Array("{\"session\":\"\(args[3])\",\"key\":\"\(args[4])\"}\n".utf8)
+gAttach = Array("{\"session\":\"\(session)\",\"key\":\"\(key)\"}\n".utf8)
 
 var apiRaw: UnsafeRawPointer?
 guard MsQuicOpenVersion(2, &apiRaw) == 0, let raw = apiRaw else { fatalError("MsQuicOpen failed") }
@@ -90,7 +104,7 @@ _ = gApi.pointee.ConfigurationLoadCredential(config, &cred)
 
 var conn: OpaquePointer?
 _ = gApi.pointee.ConnectionOpen(reg, connCb, nil, &conn)
-_ = args[1].withCString { hp in gApi.pointee.ConnectionStart(conn, config, UInt16(0), hp, port) }
+_ = host.withCString { hp in gApi.pointee.ConnectionStart(conn, config, UInt16(0), hp, port) }
 
 _ = gSem.wait(timeout: .now() + 12)
 gLock.lock(); let result = gResult; let count = gReceived.count; gLock.unlock()

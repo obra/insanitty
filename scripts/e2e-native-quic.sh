@@ -15,10 +15,10 @@ WS=insanitty-native
 cleanup() { "$HELPER" shutdown >/dev/null 2>&1; tmux kill-session -t "$WS" 2>/dev/null; }
 trap cleanup EXIT
 
-LINE=$("$HELPER" launch-or-resume "$WS" --ttl 8h --key-ttl 30s 2>/dev/null)
-field() { printf '%s' "$LINE" | tr ' ' '\n' | sed -n "s/$1//p"; }
-ADDR=$(field quic_addr=)
-OUT=$(./build/quic-client "${ADDR%:*}" "${ADDR##*:}" "$(field '^session=')" "$(field '^key=')")
+LINE=$("$HELPER" launch-or-resume "$WS" --ttl 8h --key-ttl 30s 2>/dev/null | grep -m1 '^FANTASTTY_REMOTE ')
+[ -n "$LINE" ] || { echo "NATIVE QUIC E2E FAIL: no FANTASTTY_REMOTE bootstrap line from helper"; exit 1; }
+# Feed the real bootstrap line to the native client, which parses it with RemoteBootstrapLine.
+OUT=$(printf '%s\n' "$LINE" | ./build/quic-client --bootstrap)
 echo "$OUT"
 echo "$OUT" | grep -q 'NATIVE-QUIC-OK' || { echo "NATIVE QUIC E2E FAIL"; exit 1; }
 echo "NATIVE QUIC E2E PASS"
