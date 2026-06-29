@@ -22,10 +22,18 @@ DISPLAY="$DISP" matchbox-window-manager >/tmp/wm-cc.log 2>&1 & WM=$!; sleep 1
 DISPLAY="$DISP" XDG_CONFIG_HOME=/tmp/inscfg XDG_STATE_HOME="$XDG_STATE_HOME" INSANITTY_TMUX_CC=1 \
   GHOSTTY_RESOURCES_DIR="$GS/zig-out/share/ghostty" LD_LIBRARY_PATH="$GS/zig-out/lib" \
   dbus-run-session -- ./build/insanitty >/tmp/app-cc.log 2>&1 & APP=$!
-sleep 6
-# Drive the session from outside; the in-app -CC client should receive %output and render it.
-tmux send-keys -t insanitty-cc 'echo CTRL-MODE-RENDER-OK' Enter; sleep 3
+sleep 7
+# Type into the silent surface: keystrokes route to tmux (send-keys), the shell runs the
+# command, and tmux's %output is injected back — exercising the full control-mode loop.
+DISPLAY="$DISP" xdotool mousemove 650 300 click 1; sleep 1
+DISPLAY="$DISP" xdotool type --delay 70 'echo TMUX-CC-INPUT-OK'; sleep 0.4
+DISPLAY="$DISP" xdotool key Return; sleep 3
 DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null
 grep -q 'tmux-cc: attached' /tmp/app-cc.log || { echo "TMUX-CC E2E FAIL: control client did not attach"; exit 1; }
-grep -q 'tmux-cc: rendered' /tmp/app-cc.log || { echo "TMUX-CC E2E FAIL: no %output rendered from the control session"; exit 1; }
-echo "TMUX-CC E2E PASS: insanitty attached tmux -CC and rendered its pane via inject_output ($SHOT)"
+# Input reached tmux (and ran in the real session):
+tmux capture-pane -t insanitty-cc -p 2>/dev/null | grep -q 'TMUX-CC-INPUT-OK' \
+  || { echo "TMUX-CC E2E FAIL: typed input did not reach the tmux session"; exit 1; }
+# Output came back over the control protocol and was injected:
+grep -q 'tmux-cc: rendered' /tmp/app-cc.log \
+  || { echo "TMUX-CC E2E FAIL: no %output rendered from the control session"; exit 1; }
+echo "TMUX-CC E2E PASS: insanitty drove tmux -CC end to end — typed input → send-keys → shell → %output → inject_output ($SHOT)"

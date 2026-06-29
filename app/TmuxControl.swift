@@ -15,6 +15,12 @@ final class TmuxControlClient {
     private var pid: pid_t = 0
     private var partial: [UInt8] = []
     private var loggedRender = false
+    /// The pane keystrokes are routed to (the last pane to produce output / become active).
+    private(set) var activePane: Int?
+    /// Fallback pane (queried from tmux up front) so input works before the first %output.
+    var defaultPane: Int?
+    /// The pane to route keystrokes to right now.
+    var inputPane: Int? { activePane ?? defaultPane }
 
     /// Look up or create the surface a pane's output should be injected into (main thread).
     var surfaceForPane: ((_ pane: Int) -> OpaquePointer?)?
@@ -74,6 +80,7 @@ final class TmuxControlClient {
     private func handleLine(_ line: String) {
         switch TmuxControlParser.parse(line: line) {
         case .output(let pane, let bytes):
+            if activePane == nil { activePane = pane }
             guard let surface = surfaceForPane?(pane), !bytes.isEmpty else { return }
             bytes.withUnsafeBytes { raw in
                 insanitty_surface_inject_output(
@@ -87,6 +94,8 @@ final class TmuxControlClient {
             if let tree = TmuxLayoutParser.parse(layout) { onLayout?(window, tree) }
         case .windowClose(let window):
             onWindowClose?(window)
+        case .windowPaneChanged(_, let pane):
+            activePane = pane
         default:
             break
         }

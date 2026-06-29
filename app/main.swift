@@ -393,10 +393,48 @@ func runDetached(_ command: String) {
     try? p.run(); p.waitUntilExit()
 }
 
+/// Run a shell command and return its stdout (used to query tmux for the control pane id).
+func shellOutput(_ command: String) -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    p.arguments = ["-c", command]
+    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { return "" }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return String(decoding: data, as: UTF8.self)
+}
+
 /// A silent terminal surface: its shell discards input and emits nothing, so the surface renders
 /// ONLY bytes injected into it — used as a tmux control-mode pane.
 func makeSilentTerminal() -> OpaquePointer? {
     makeTerminal("stty raw -echo 2>/dev/null; exec cat >/dev/null")
+}
+
+/// Encode a GDK keypress into the bytes tmux expects (sent via `send-keys -H`): printable
+/// characters, Enter/Tab/Backspace/Escape, Ctrl-letters, and the arrow keys.
+func encodeTmuxKey(keyval: guint, state: GdkModifierType) -> [UInt8]? {
+    let ctrl = (state.rawValue & GDK_CONTROL_MASK.rawValue) != 0
+    if keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter { return [0x0D] }
+    if keyval == GDK_KEY_BackSpace { return [0x7F] }
+    if keyval == GDK_KEY_Tab { return [0x09] }
+    if keyval == GDK_KEY_Escape { return [0x1B] }
+    if keyval == GDK_KEY_Up { return [0x1B, 0x5B, 0x41] }
+    if keyval == GDK_KEY_Down { return [0x1B, 0x5B, 0x42] }
+    if keyval == GDK_KEY_Right { return [0x1B, 0x5B, 0x43] }
+    if keyval == GDK_KEY_Left { return [0x1B, 0x5B, 0x44] }
+    let uni = gdk_keyval_to_unicode(keyval)
+    guard uni != 0, let scalar = Unicode.Scalar(uni) else { return nil }
+    if ctrl, scalar.value >= 0x40, scalar.value < 0x7F { return [UInt8(scalar.value & 0x1F)] }
+    return Array(String(scalar).utf8)
+}
+
+/// Key pressed on the tmux -CC surface → forward to the control session's active pane.
+let ctrlKeyCb: @convention(c) (OpaquePointer?, guint, guint, GdkModifierType, UnsafeMutableRawPointer?) -> gboolean = { _, keyval, _, state, _ in
+    guard let client = ctrlClient, let pane = client.inputPane,
+          let bytes = encodeTmuxKey(keyval: keyval, state: state) else { return 0 }
+    client.sendKeys(pane: pane, bytes: bytes)
+    return 1
 }
 
 /// A "tmux -CC" workspace: insanitty owns the `tmux -CC` control session and renders its pane by
@@ -413,12 +451,21 @@ func makeControlModeWorkspacePage() -> OpaquePointer? {
     gtk_box_append(P(vbox), P(tabView))
 
     let term = makeSilentTerminal()!
+    // Route keystrokes on this surface to tmux (the surface's own shell is a no-op cat).
+    let kc = OP(gtk_event_controller_key_new())
+    gtk_event_controller_set_propagation_phase(P(kc), GTK_PHASE_CAPTURE)
+    g_signal_connect_data(raw(kc), "key-pressed", unsafeBitCast(ctrlKeyCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_widget_add_controller(P(term), P(kc))
     let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
     gtk_box_append(P(box), P(term))
     let page = OP(adw_tab_view_append(P(tabView), P(box)))!
     adw_tab_page_set_title(P(page), "tmux -CC")
 
     let client = TmuxControlClient(session: "insanitty-cc")
+    // Query the session's pane id so keystrokes work before the first %output arrives.
+    let paneRaw = shellOutput("tmux list-panes -t insanitty-cc -F '#{pane_id}' | head -1")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    if paneRaw.hasPrefix("%") { client.defaultPane = Int(paneRaw.dropFirst()) }
     client.surfaceForPane = { pane in
         if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = term }
         return ctrlPaneSurfaces[pane]
