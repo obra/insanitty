@@ -6,24 +6,32 @@ deep read of both codebases.
 
 **Status legend:** **REAL** = production-quality, wired into the app · **PARTIAL** =
 works but narrower than Fantastty · **DEMO** = proves the path via a shortcut (dev
-script / hardcoded data / test-only wiring) · **STUB** = present but inert · **ABSENT**
-= not ported.
+script / hardcoded data / test-only wiring) · **STUB** = present but inert · **INHERITED**
+= provided by the embedded Ghostty apprt · **TEST-ONLY** = logic tested but unwired ·
+**ABSENT** = not ported.
 
 ## Verdict
 
-insanitty has a **real terminal-workspace-manager core** — live embedded Ghostty
-terminals with true I/O, focus-aware splits, terminal tabs, a workspace sidebar, and
-per-workspace tmux persistence of the primary shell — shipped as an installable `.deb`
-with automatic CI builds. That core is genuine and non-trivial (it required embedding
-Ghostty's GTK apprt as a shared library, which is novel work).
+insanitty has a **real terminal-workspace-manager core plus most of what distinguishes
+Fantastty**, shipped as an installable `.deb` with CI, built against a durable vendored
+toolchain (`scripts/build-ghostty.sh` + `scripts/build-msquic.sh` → `vendor/`).
 
-It does **not** have feature parity yet. The features that distinguish Fantastty —
-the **remote engine in the GUI**, **full tmux control-mode** (windows↔tabs, panes↔splits,
-layout restore), **session/layout persistence and metadata** (notes, tickets, attention,
-active-time, archive/trash), **Linear**, **sprites**, **settings**, **theming**, and a
-**real browser** — are demo, stub, or absent. By feature count insanitty covers roughly
-a quarter of Fantastty's surface; by "time spent in the app" it covers the most-used
-part (the terminal) and little of the differentiated part.
+REAL and wired: live embedded Ghostty terminals, focus-aware splits, terminal tabs, a
+workspace sidebar, per-workspace tmux persistence, a real browser, layout persistence —
+**plus** the **remote engine in the GUI** (in-process SPKI-pinned QUIC, multi-pane,
+live input round-trip, predictive echo, held-connection continuous re-poll), **full
+tmux control-mode** (windows↔tabs, panes↔splits, input, sizing), **settings + theming**
+(system/light/dark), **session notes** with edit history, **per-workspace metadata**
+(`workspaces.json`: notes, archive/trash, active-time, ticket/PR fields), and desktop
+**notifications** (inherited from ghostty's apprt). ~22 of ~37 rows are REAL.
+
+Remaining gaps (honestly scoped, see rows below): **OSC 9 note/ticket/pr interception**
+(the store half is built; the surface→app interception needs a `patches/ghostty-gtk-embed.patch`
+hook + rebuild), **datagram-delta external streaming** (background remote output appears on
+the next interaction, not autonomously), **full within-workspace layout restore** (would
+need tmux-backed splits everywhere), and the integration/infra items — **Linear**,
+**sprites** (Fly.io CLI), **SSH remote transport**, **attach UI** — which need external
+services or an SSH host to build against.
 
 The sections below are the unvarnished detail.
 
@@ -50,8 +58,8 @@ The sections below are the unvarnished detail.
 | Fantastty | insanitty | Notes |
 |---|---|---|
 | **tmux control mode (`-CC`)**: `TmuxControlClient`, protocol parser, V2 runtime, layout parser/mapper — windows↔tabs, panes↔splits, live layout sync | **REAL — full mapping, env-gated demo** (`TmuxControlParser`/`TmuxLayoutParser` + live `TmuxControlClient`, `app/TmuxControl.swift`) | Parser foundation (12 tests) **plus a live, interactive control client** that: spawns `tmux -CC attach` in a PTY (`ins_pty_spawn`/`forkpty`), reads the protocol on the GTK main loop (`g_unix_fd_add`), renders panes by injecting `%output` into silent Ghostty surfaces, routes keystrokes via `send-keys`, sizes the client to the surfaces (`refresh-client -C`), and maps **windows → AdwTabView tabs** and **panes → GtkPaned splits** from `%layout-change`/`#{window_layout}` (surfaces reused across relayouts). Verified: interactive single pane, 2-pane split, 2-window tabs — `scripts/e2e-tmux-control{,-split,-windows}.sh`. Remaining: make it the **default** workspace backend (today it's an env-gated demo workspace; the default workspaces still use plain `tmux new-session -A`). |
-| Attach to existing session (local + SSH), `TmuxAttachSheet` | **ABSENT** | No attach UI. |
-| SSH remote tmux (`ssh -t … tmux -CC`) | **ABSENT** | |
+| Attach to existing session (local + SSH), `TmuxAttachSheet` | **ABSENT** | No attach UI. The tmux control-mode engine exists (`TmuxControlClient`); an attach picker is the remaining UI. |
+| SSH remote tmux (`ssh -t … tmux -CC`) | **ABSENT** | The local tmux `-CC` control mode works end-to-end; the SSH transport (run the control client over `ssh -t`) is unbuilt — defer (needs an SSH host to verify against). |
 | `persistentSessions` toggle (default **off**), restore layout on launch | **PARTIAL** | tmux persistence is always-on for the primary shell and **verified** (`e2e-persistence.sh`: a process outlived an app kill, V1<V2<V3). But there is **no layout restore** — only the tmux server retains the shell; the app rebuilds a fresh default workspace set each launch. |
 
 ## Persistence & session metadata
@@ -86,10 +94,10 @@ This is the most nuanced area and the most overstated in earlier notes. Breaking
 
 | Fantastty | insanitty | Notes |
 |---|---|---|
-| OSC 9 `note;`/`ticket;`/`pr;` interception (fully wired, writes to `workspaces.json`) | **STUB** | `scripts/shell-integration/insanitty.sh` **emits** the OSC sequences, but nothing in `app/` **consumes** them. Emitter without a receiver. |
-| Linear (`LinearService`: API + Keychain token + UI) | **TEST-ONLY** | `LinearURL.swift` parses issue/project URLs (tested) but is **wired to nobody** — no GraphQL, no token, no UI. |
-| Sprites (external Fly.io `sprite` CLI) | **ABSENT** | |
-| Notifications | **ABSENT** | |
+| OSC 9 `note;`/`ticket;`/`pr;` interception (fully wired, writes to `workspaces.json`) | **STUB** | `scripts/shell-integration/insanitty.sh` **emits** the sequences, and `WorkspaceMetadata` now has the `notes`/`ticketURL`/`pullRequestURL` fields to receive them — but the embedding shim doesn't yet surface custom OSC from the surface to `app/`. Needs a `patches/ghostty-gtk-embed.patch` hook (forward unhandled OSC to an insanitty callback) + rebuild. The note/store half is built; the interception half is the open Zig patch. |
+| Linear (`LinearService`: API + Keychain token + UI) | **TEST-ONLY** | `LinearURL.swift` parses issue/project URLs (tested) but is **wired to nobody** — no GraphQL, no token, no UI. Needs Linear API access (defer; integration, not core terminal parity). |
+| Sprites (external Fly.io `sprite` CLI) | **ABSENT** | Depends on the external Fly.io `sprite` CLI + account; out of scope for the local port (defer pending the CLI/infra). |
+| Notifications | **INHERITED** (ghostty apprt) | Ghostty's embedded GTK apprt implements `desktop_notification` (`application.zig` → `gio.Notification` + `send_notification`), so an OSC 9/777 notification from a terminal flows through insanitty's embedded `GApplication`. Confirmed the OSC reaches ghostty and the GNotification/portal stack activates in response; a clean end-to-end capture needs a real notification daemon (and ghostty focus-gates), so it's not asserted headlessly. |
 | Theming (`ThemeManager`, `AppearanceMode`/dark mode) | **REAL** (`AppearanceMode`, `applyAppearance`) | System/Light/Dark, persisted in `settings.json`, applied to the libadwaita chrome via `AdwStyleManager` at startup and live on change. Verified: a dark preference loads dark chrome (`scripts/e2e-settings.sh`, `docs/images/e2e-8-settings.png`). |
 | Settings / preferences (`@AppStorage` keys) | **REAL** (`Settings`/`SettingsStore`, `openSettings`) | An `AdwPreferencesWindow` (gear in the header) with Appearance (theme), Sidebar (tab thumbnails), Sessions (persistent sessions), Remote Engine (predictive echo); changes apply + persist immediately to `$XDG_STATE_HOME/insanitty/settings.json`. Store + tolerant decode unit-tested (6 tests); window + live-persist e2e-verified (`scripts/e2e-settings.sh`). |
 
