@@ -9,6 +9,23 @@ import Foundation
 import Glibc
 #endif
 
+// One msquic handle + registration, opened once and reused across all fetches. Closing a
+// registration deadlocks on its worker threads, so we keep exactly one for the app's lifetime —
+// this is what lets the remote workspace poll continuously without leaking a registration per fetch.
+nonisolated(unsafe) var gQuicApi: UnsafePointer<QUIC_API_TABLE>?
+nonisolated(unsafe) var gQuicReg: OpaquePointer?
+func sharedQuic() -> (UnsafePointer<QUIC_API_TABLE>, OpaquePointer)? {
+    if let a = gQuicApi, let r = gQuicReg { return (a, r) }
+    var apiRaw: UnsafeRawPointer?
+    guard MsQuicOpenVersion(2, &apiRaw) == 0, let raw = apiRaw else { return nil }
+    let a = raw.assumingMemoryBound(to: QUIC_API_TABLE.self)
+    var reg: OpaquePointer?
+    _ = a.pointee.RegistrationOpen(nil, &reg)
+    guard let r = reg else { return nil }
+    gQuicApi = a; gQuicReg = r
+    return (a, r)
+}
+
 final class RemoteQuicFetcher {
     var api: UnsafePointer<QUIC_API_TABLE>!
     private var received = Data()
@@ -25,6 +42,8 @@ final class RemoteQuicFetcher {
     private var sendKeysBytes: [UInt8] = []; private var sendKeysBuf = QUIC_BUFFER()
     private var reqKfBytes: [UInt8] = [];    private var reqKfBuf = QUIC_BUFFER()
     var stream: OpaquePointer?               // the attach stream, kept to request a keyframe later (set from remoteConnCb)
+    var heldConn: OpaquePointer?             // kept open in hold mode so repoll() reuses one connection
+    var heldConfig: OpaquePointer?
     let sem = DispatchSemaphore(value: 0)
     let lock = NSLock()
 
@@ -40,13 +59,11 @@ final class RemoteQuicFetcher {
     }
 
     /// Connect, collect the snapshot + pane keyframes (blocking, with an 8s timeout). Returns true
-    /// if anything was received.
-    func fetch(host: String, port: UInt16) -> Bool {
-        var apiRaw: UnsafeRawPointer?
-        guard MsQuicOpenVersion(2, &apiRaw) == 0, let raw = apiRaw else { return false }
-        api = raw.assumingMemoryBound(to: QUIC_API_TABLE.self)
-        var reg: OpaquePointer?
-        _ = api.pointee.RegistrationOpen(nil, &reg)
+    /// if anything was received. With `hold`, the connection is kept open afterwards so `repoll()`
+    /// can reuse it — keeping the helper's tmux client attached so external output keeps streaming.
+    func fetch(host: String, port: UInt16, hold: Bool = false) -> Bool {
+        guard let (sharedApi, reg) = sharedQuic() else { return false }
+        api = sharedApi
         var config: OpaquePointer?
         let alpn = Array("fantastty-remote-engine-v1".utf8)
         alpn.withUnsafeBufferPointer { ap in
@@ -65,20 +82,54 @@ final class RemoteQuicFetcher {
         _ = api.pointee.ConnectionOpen(reg, remoteConnCb, ctx, &conn)
         _ = host.withCString { hp in api.pointee.ConnectionStart(conn, config, UInt16(0), hp, port) }
         _ = sem.wait(timeout: .now() + 8)
-        // If we forwarded keystrokes, let the remote shell process them, then request a full
-        // keyframe (the echoed output is now in the captured grid) and let it round-trip and
-        // overwrite keyframes[pane] before we close.
+        // The keyframe sent on attach can be stale, so always request a FRESH keyframe for the
+        // active pane before reading the result — this is what makes the workspace auto-update to
+        // the current remote state on each poll. With queued input, send the keys first and give
+        // the shell time to process them so the echoed output is in the captured grid.
+        if workspaceID.isEmpty { workspaceID = "insanitty-remote-gui" }
+        if let active = snapshot?.panes.first(where: { $0.isActive })?.paneID ?? keyframes.keys.sorted().first {
+            inputPane = active
+        }
         if !inputBytes.isEmpty {
             usleep(1_500_000)
             requestFreshKeyframe()
             usleep(1_500_000)
+        } else {
+            requestFreshKeyframe()
+            usleep(1_500_000)
         }
-        // ConnectionClose blocks until this connection's callbacks have drained, so no callback
-        // fires on this fetcher after it's released. (The registration/api are intentionally left
-        // open — a small per-fetch leak; closing the registration deadlocks on its worker threads.)
-        if let conn = conn { api.pointee.ConnectionClose(conn) }
-        if let config = config { api.pointee.ConfigurationClose(config) }
+        if hold {
+            heldConn = conn; heldConfig = config   // keep the connection open for repoll()
+        } else {
+            // ConnectionClose blocks until this connection's callbacks have drained, so no callback
+            // fires on this fetcher after it's released. (The shared registration is never closed —
+            // closing a registration deadlocks on its worker threads.)
+            if let conn = conn { api.pointee.ConnectionClose(conn) }
+            if let config = config { api.pointee.ConfigurationClose(config) }
+        }
         return snapshot != nil || !keyframes.isEmpty
+    }
+
+    /// Reuse the held-open connection: forward any queued input, then request a fresh keyframe for
+    /// the active pane and let it round-trip. Because the connection stays attached, the helper keeps
+    /// observing the tmux session, so this reflects external output too. Blocking; run off-main.
+    func repoll() {
+        guard heldConn != nil else { return }
+        if let active = snapshot?.panes.first(where: { $0.isActive })?.paneID ?? keyframes.keys.sorted().first {
+            inputPane = active
+        }
+        if !inputBytes.isEmpty {
+            sendInputIfNeeded(stream)
+            usleep(1_500_000)
+        }
+        requestFreshKeyframe()
+        usleep(1_500_000)
+    }
+
+    /// Close the held-open connection (app shutdown).
+    func closeHeld() {
+        if let conn = heldConn { api.pointee.ConnectionClose(conn); heldConn = nil }
+        if let config = heldConfig { api.pointee.ConfigurationClose(config); heldConfig = nil }
     }
 
     /// Validate the SPKI cert pin (self-signed cert; msquic's own validation is off).

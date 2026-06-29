@@ -23,6 +23,10 @@ nonisolated(unsafe) var remoteActivePane = 0                           // pane t
 nonisolated(unsafe) var pendingRemoteInput: [UInt8] = []              // keystrokes queued for the next fetch
 let remoteLock = NSLock()
 nonisolated(unsafe) var remoteRendered = false   // true once the remote workspace has painted once
+nonisolated(unsafe) var remoteFetchInFlight = false           // a poll's fetch is running
+nonisolated(unsafe) var remoteSession: RemoteQuicFetcher?     // the held-open connection (reused each poll)
+nonisolated(unsafe) var lastRemoteTreeSig = ""               // layout signature; rebuild the tree only on change
+nonisolated(unsafe) var lastRemoteAnsi: [Int: String] = [:]  // per-pane painted ANSI; re-inject only on change
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 nonisolated(unsafe) var settingsURL = SettingsStore.defaultURL()
 nonisolated(unsafe) var currentSettings = SettingsStore.load(from: SettingsStore.defaultURL())
@@ -495,6 +499,13 @@ func makeWorkspacePage(index: Int) -> OpaquePointer? {
 let remoteKeyCb: @convention(c) (OpaquePointer?, guint, guint, GdkModifierType, UnsafeMutableRawPointer?) -> gboolean = { _, keyval, _, state, _ in
     guard let bytes = encodeTmuxKey(keyval: keyval, state: state) else { return 0 }
     remoteLock.lock(); pendingRemoteInput.append(contentsOf: bytes); remoteLock.unlock()
+    // Predictive echo: paint the typed bytes into the active pane immediately, so input feels
+    // instant; the next keyframe poll reconciles to the authoritative remote grid.
+    if currentSettings.remotePredictiveEcho, let s = remotePaneSurfaces[remoteActivePane] {
+        bytes.withUnsafeBytes { raw in
+            insanitty_surface_inject_output(P(s), raw.bindMemory(to: CChar.self).baseAddress, bytes.count)
+        }
+    }
     return 1
 }
 
@@ -751,12 +762,10 @@ func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data?
 /// panes onto GtkPaned splits, painting each keyframe via inject_output. No subprocess for QUIC.
 func injectRemoteGrid() {
     guard remotePaneContainer != nil else { return }
-    // Steady state: once painted, only fetch again when there are queued keystrokes to forward.
-    remoteLock.lock(); let hasInput = !pendingRemoteInput.isEmpty; remoteLock.unlock()
-    if remoteRendered && !hasInput { return }
     // Test hook: render a jsonl fixture of remote messages instead of connecting, to exercise the
     // multi-pane mapping (the live multi-pane path needs the helper's --tmux-session, unavailable here).
     if let fixture = ProcessInfo.processInfo.environment["INSANITTY_REMOTE_FIXTURE"] {
+        if remoteRendered { return }   // the fixture is static — paint it once
         Thread.detachNewThread {
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: fixture)) else { return }
             let fetcher = RemoteQuicFetcher()
@@ -767,7 +776,26 @@ func injectRemoteGrid() {
         }
         return
     }
+    // Continuous streaming: connect once and HOLD the connection open, then re-poll it each tick so
+    // the workspace auto-updates (the helper keeps its tmux client attached, so external output keeps
+    // streaming). Queued keystrokes ride along. Skip if the previous poll is still running.
+    remoteLock.lock()
+    if remoteFetchInFlight { remoteLock.unlock(); return }
+    remoteFetchInFlight = true
+    remoteLock.unlock()
     Thread.detachNewThread {
+        defer { remoteLock.lock(); remoteFetchInFlight = false; remoteLock.unlock() }
+        // Steady state: reuse the held-open connection.
+        if let session = remoteSession {
+            remoteLock.lock(); let input = pendingRemoteInput; pendingRemoteInput = []; remoteLock.unlock()
+            session.inputBytes = input
+            session.repoll()
+            session.inputBytes = []
+            remoteLock.lock(); pendingFetcher = session; remoteLock.unlock()
+            g_idle_add(remoteRenderIdle, nil)
+            return
+        }
+        // First time: launch-or-resume the helper for a bootstrap, then connect + hold.
         let helper = FileManager.default.isExecutableFile(atPath: "build/fantastty-helper")
             ? "build/fantastty-helper" : "/tmp/fantastty-helper"
         // Opt in to a tmux-backed remote workspace (multi-pane + live input) by pointing at an
@@ -784,14 +812,12 @@ func injectRemoteGrid() {
         }
         let fetcher = RemoteQuicFetcher(bootstrap: boot)
         remoteLock.lock(); let input = pendingRemoteInput; pendingRemoteInput = []; remoteLock.unlock()
-        if !input.isEmpty {
-            fetcher.workspaceID = "insanitty-remote-gui"
-            fetcher.inputBytes = input
-            fetcher.inputPane = remoteActivePane
+        fetcher.inputBytes = input   // workspaceID + inputPane are set inside fetch()
+        guard fetcher.fetch(host: boot.host, port: boot.port, hold: true), !fetcher.keyframes.isEmpty else {
+            fetcher.closeHeld(); return
         }
-        guard fetcher.fetch(host: boot.host, port: boot.port), !fetcher.keyframes.isEmpty else {
-            FileHandle.standardError.write(Data("insanitty: native QUIC fetch failed\n".utf8)); return
-        }
+        fetcher.inputBytes = []
+        remoteSession = fetcher
         remoteLock.lock(); pendingFetcher = fetcher; remoteLock.unlock()
         g_idle_add(remoteRenderIdle, nil)
     }
@@ -817,28 +843,41 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
         tree = .leaf(pane: pane)   // no usable layout → a single pane
     } else { return }
 
-    for (_, s) in remotePaneSurfaces where gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
-    while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
-    let widget = buildPaneTree(tree) { pane in
-        if remotePaneSurfaces[pane] == nil { remotePaneSurfaces[pane] = makeRemotePaneSurface() }
-        return remotePaneSurfaces[pane]
+    // Rebuild the GtkPaned tree only when the layout / pane-set changes — otherwise the surfaces
+    // stay put across polls (no flicker). A relayout forces a repaint of every pane.
+    let sig = (layout ?? "leaf") + "|" + fetcher.keyframes.keys.sorted().map(String.init).joined(separator: ",")
+    if sig != lastRemoteTreeSig {
+        for (_, s) in remotePaneSurfaces where gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+        while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
+        let widget = buildPaneTree(tree) { pane in
+            if remotePaneSurfaces[pane] == nil { remotePaneSurfaces[pane] = makeRemotePaneSurface() }
+            return remotePaneSurfaces[pane]
+        }
+        if let widget = widget { gtk_box_append(P(container), P(widget)) }
+        lastRemoteTreeSig = sig
+        lastRemoteAnsi = [:]
+        FileHandle.standardError.write(Data("insanitty: rendered \(fetcher.keyframes.count)-pane remote workspace (native QUIC)\n".utf8))
     }
-    if let widget = widget { gtk_box_append(P(container), P(widget)) }
 
+    remoteActivePane = fetcher.snapshot?.panes.first(where: { $0.isActive })?.paneID
+        ?? fetcher.keyframes.keys.sorted().first ?? 0
+
+    // Paint only the panes whose content changed since the last poll. Skipping unchanged panes
+    // avoids flicker AND lets a predictive-echo paint survive until the real keyframe differs.
     for (pane, kf) in fetcher.keyframes {
         guard let surface = remotePaneSurfaces[pane] else { continue }
-        let ansi = Data(RemoteGridRenderer.ansi(for: kf).utf8)
+        let ansiStr = RemoteGridRenderer.ansi(for: kf)
+        if lastRemoteAnsi[pane] == ansiStr { continue }
+        lastRemoteAnsi[pane] = ansiStr
+        let ansi = Data(ansiStr.utf8)
         ansi.withUnsafeBytes { raw in
             insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, ansi.count)
         }
-    }
-    remoteActivePane = fetcher.snapshot?.panes.first(where: { $0.isActive })?.paneID
-        ?? fetcher.keyframes.keys.sorted().first ?? 0
-    FileHandle.standardError.write(Data("insanitty: rendered \(fetcher.keyframes.count)-pane remote workspace (native QUIC)\n".utf8))
-    if let kf = fetcher.keyframes[remoteActivePane] {
-        let content = kf.rows.map { $0.cells.map { $0.text }.joined() }.joined(separator: " ")
-            .trimmingCharacters(in: .whitespaces).prefix(200)
-        FileHandle.standardError.write(Data("insanitty: remote pane \(remoteActivePane) content: \(content)\n".utf8))
+        if pane == remoteActivePane {
+            let content = kf.rows.map { $0.cells.map { $0.text }.joined() }.joined(separator: " ")
+                .trimmingCharacters(in: .whitespaces).prefix(200)
+            FileHandle.standardError.write(Data("insanitty: remote pane \(pane) content: \(content)\n".utf8))
+        }
     }
 }
 

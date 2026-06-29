@@ -26,7 +26,7 @@ sleep 5
 # Switch to the "remote (QUIC)" workspace (4th sidebar row; thumbnail rows are ~155px tall)
 # so its surface realizes; the re-inject timer then paints the fetched grid where we can see it.
 DISPLAY=:122 xdotool mousemove 110 590 click 1
-sleep 8
+sleep 13   # the default (non-tmux) workspace's helper renderer can take several seconds to launch
 DISPLAY=:122 import -window root "$SHOT" 2>/dev/null
 grep -q 'rendered .* remote workspace (native QUIC)' /tmp/app-rgui.log || { echo "REMOTE-GUI E2E FAIL: app did not render the remote workspace"; exit 1; }
 echo "REMOTE-GUI E2E PASS: insanitty fetched a grid over QUIC and rendered it ($SHOT)"
