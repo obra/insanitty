@@ -103,9 +103,14 @@ This is the most nuanced area and the most overstated in earlier notes. Breaking
 
 ## Keyboard shortcuts
 
-**PARTIAL.** insanitty hardcodes Ctrl+D / Ctrl+Shift+D (split), Ctrl+T (tab), Ctrl+B
-(browser), Ctrl+N (workspace) in one capture-phase handler — no rebinding, no config,
-and not the full Fantastty `AppCommands` set.
+**REAL.** Fantastty's shortcuts are **hardcoded too** (`AppCommands`, no config), so the parity
+bar is the *set*, not a rebinding engine. insanitty's capture-phase handler covers the equivalent
+set (Cmd→Ctrl): split (Ctrl+D / Ctrl+Shift+D), new tab/browser/workspace (Ctrl+T / Ctrl+B /
+Ctrl+N), overview (Ctrl+O), toggle notes (Ctrl+.), prev/next workspace (Ctrl+` / Ctrl+Shift+`),
+prev/next tab (Ctrl+Shift+PageUp/PageDown), close tab (Ctrl+W), close workspace (Ctrl+Shift+W),
+**toggle attention** (Ctrl+Shift+A) + **next flagged** (Ctrl+Shift+F). The attention flag shows a
+⚠ marker in the sidebar, persists to `workspaces.json`, and is restored on launch
+(`scripts/e2e-keybindings.sh`).
 
 ## Build / CI honesty
 

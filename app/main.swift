@@ -112,10 +112,17 @@ final class WorkspaceTile {
     let livePaintable: OpaquePointer
     let name: String
     let index: Int   // tmux session index, or -1 for the non-persisted "remote (QUIC)" demo
-    init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer, name: String, index: Int) {
+    let label: OpaquePointer   // the sidebar name label (updated to show the attention marker)
+    init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer, name: String, index: Int, label: OpaquePointer) {
         self.page = page; self.picture = picture; self.livePaintable = livePaintable
-        self.name = name; self.index = index
+        self.name = name; self.index = index; self.label = label
     }
+}
+
+/// Show/hide the ⚠ attention marker on a workspace's sidebar label.
+func setTileAttention(_ tileIdx: Int, _ on: Bool) {
+    guard tileIdx >= 0, tileIdx < tiles.count else { return }
+    gtk_label_set_text(P(tiles[tileIdx].label), (on ? "\u{26A0} " : "") + tiles[tileIdx].name)
 }
 nonisolated(unsafe) var tiles: [WorkspaceTile] = []
 nonisolated(unsafe) var sidebarList: OpaquePointer?
@@ -225,6 +232,54 @@ func newTabInCurrentWorkspace() {
     addTab(to: currentTabView())
 }
 
+/// Select the workspace `delta` rows away (wrapping), updating the sidebar selection.
+func selectAdjacentWorkspace(_ delta: Int) {
+    guard let list = sidebarList, !tiles.isEmpty else { return }
+    let n = tiles.count
+    let next = ((currentWorkspace + delta) % n + n) % n
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(next)))))
+}
+
+/// Select the next/previous tab in the current workspace's tab view.
+func selectAdjacentTab(_ delta: Int) {
+    guard let tabView = currentTabView() else { return }
+    if delta > 0 { adw_tab_view_select_next_page(P(tabView)) } else { adw_tab_view_select_previous_page(P(tabView)) }
+}
+
+/// Close the current tab: a tmux window for control-mode workspaces (`kill-window`).
+func closeCurrentTab() {
+    if let cw = currentControlWorkspace() { cw.client.send("kill-window"); return }
+    if let tabView = currentTabView(), let page = OP(adw_tab_view_get_selected_page(P(tabView))) {
+        adw_tab_view_close_page(P(tabView), P(page))
+    }
+}
+
+/// Close (archive) the current workspace.
+func closeCurrentWorkspace() {
+    guard currentWorkspace >= 0, currentWorkspace < tiles.count, tiles[currentWorkspace].index >= 0 else { return }
+    archiveWorkspace(tmuxIndex: tiles[currentWorkspace].index, trash: false)
+}
+
+/// Toggle the attention flag on the current workspace (persisted + sidebar ⚠ marker).
+func toggleCurrentAttention() {
+    guard currentWorkspace >= 0, currentWorkspace < tiles.count, let id = currentWorkspaceID() else { return }
+    var m = metaFor(id); m.needsAttention.toggle(); m.modifiedAt = Date()
+    workspaceMeta[id] = m; saveWorkspaceMeta()
+    setTileAttention(currentWorkspace, m.needsAttention)
+}
+
+/// Select the next workspace flagged for attention.
+func selectNextFlaggedWorkspace() {
+    guard let list = sidebarList, !tiles.isEmpty else { return }
+    let n = tiles.count
+    for off in 1...n {
+        let i = (currentWorkspace + off) % n
+        if tiles[i].index >= 0, workspaceMeta["insanitty-ws-\(tiles[i].index)"]?.needsAttention == true {
+            gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(i))))); return
+        }
+    }
+}
+
 /// Add a workspace page to the stack and a live-thumbnail row to the custom sidebar.
 @discardableResult
 func registerWorkspace(_ page: OpaquePointer, name: String, id: String, index: Int) -> Int {
@@ -263,7 +318,10 @@ func registerWorkspace(_ page: OpaquePointer, name: String, id: String, index: I
         gtk_widget_add_controller(P(row), P(rclick))
     }
 
-    tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable, name: name, index: index))
+    tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable, name: name, index: index, label: label))
+    if index >= 0, workspaceMeta["insanitty-ws-\(index)"]?.needsAttention == true {
+        setTileAttention(tiles.count - 1, true)   // restore a persisted attention flag
+    }
     return tiles.count - 1
 }
 
@@ -1340,6 +1398,14 @@ func buildWindow() {
             toggleOverview()
             return 1
         }
+        if ctrl && keyval == GDK_KEY_period { openNotes(); return 1 }                         // toggle notes
+        if ctrl && keyval == GDK_KEY_grave { selectAdjacentWorkspace(shift ? -1 : 1); return 1 }  // prev/next workspace
+        if ctrl && shift && keyval == GDK_KEY_Page_Down { selectAdjacentTab(1); return 1 }
+        if ctrl && shift && keyval == GDK_KEY_Page_Up { selectAdjacentTab(-1); return 1 }
+        if ctrl && shift && (keyval == GDK_KEY_w || keyval == GDK_KEY_W) { closeCurrentWorkspace(); return 1 }
+        if ctrl && (keyval == GDK_KEY_w || keyval == GDK_KEY_W) { closeCurrentTab(); return 1 }
+        if ctrl && shift && (keyval == GDK_KEY_a || keyval == GDK_KEY_A) { toggleCurrentAttention(); return 1 }
+        if ctrl && shift && (keyval == GDK_KEY_f || keyval == GDK_KEY_F) { selectNextFlaggedWorkspace(); return 1 }
         return 0
     }
     let keyctl = OP(gtk_event_controller_key_new())
