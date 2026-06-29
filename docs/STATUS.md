@@ -34,10 +34,21 @@ workspaces (sidebar + switching), **terminal + browser tabs** (Ctrl+T / Ctrl+B; 
 WebKitGTK — `docs/images/e2e-6-browser.png`), **splits** (Ctrl+D right / Ctrl+Shift+D down,
 focus-aware), **tmux-backed persistent sessions**, live terminals with interactive I/O.
 Screenshots in `docs/images/`.
+**Remote feature set — works end-to-end locally** (`scripts/e2e-remote-engine.sh`, PASS).
+The Go helper (Fantastty's, reused unchanged) builds here with libghostty-vt (Go 1.25,
+`scripts/build-remote-helper.sh`) and serves QUIC on 127.0.0.1 — **localhost is the host**, so
+no separate LAN machine is needed. Using the helper's reference QUIC client (its probes):
+1. **QUIC attach** (cert-pinned SPKI + one-time key) + **structured-grid render** pulled over
+   QUIC (`workspaceSnapshot` + `paneKeyframe`, byte-for-byte matching SPEC §4.3);
+2. **input** sent over QUIC reached the remote pane;
+3. **cert pinning enforced** — a wrong SPKI is rejected (`CRYPTO_ERROR … SPKI SHA256`).
+So the remote protocol + QUIC transport + tmux→libghostty-vt server rendering + security all
+function. Remaining for the remote feature *in insanitty itself*: port the Swift client
+transport (msquic) + the ~3k lines of protocol/grid/echo logic (the Go probe is the reference).
+
 Not yet (deferred): the full tmux **control-mode** mapping (tmux windows↔tabs, panes↔splits
 within ONE session per workspace — currently each workspace attaches its own session, splits
-are local panes); notes/URLs/Linear/sprites/browser; the remote engine (Spike C / msquic —
-needs a build + a LAN host, can't be fully e2e-tested headless here).
+are local panes); notes/URLs/Linear/sprites; the **insanitty-side** Swift QUIC client.
 
 ## Verified on the dev box (2026-06-29)
 
