@@ -13,7 +13,7 @@ VERSION="${VERSION:-0.1.0~dev}"
 ARCH="${ARCH:-$(dpkg --print-architecture 2>/dev/null || echo amd64)}"
 GHOSTTY="${GHOSTTY:-$PWD/vendor/ghostty}"   # scripts/build-ghostty.sh builds the lib here
 ZLIB="$GHOSTTY/zig-out/lib"; ZSHARE="$GHOSTTY/zig-out/share/ghostty"
-MQ="${MSQUIC:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/msquic}"
+MQ="${MSQUIC:-$PWD/vendor/msquic}"   # scripts/build-msquic.sh builds it here
 MQLIB="$MQ/build/bin/Release"
 HELPER="${HELPER:-build/fantastty-helper}"; [ -x "$HELPER" ] || HELPER=/tmp/fantastty-helper
 

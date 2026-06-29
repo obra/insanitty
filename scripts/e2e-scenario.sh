@@ -11,7 +11,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
+GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 OUT="${OUT:-docs/images}"
 DISP=":121"
 mkdir -p /tmp/inscfg/ghostty "$OUT"; echo "initial-window = false" > /tmp/inscfg/ghostty/config

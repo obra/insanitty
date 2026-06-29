@@ -6,7 +6,7 @@
 # no bash/Python. Headless: Xvfb + WM + dbus.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
+GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 SHOT="${OUT:-docs/images}/e2e-7-remote-in-gui.png"
 [ -x build/insanitty ] || { echo "build the app first: scripts/build-app.sh"; exit 1; }
 export LD_LIBRARY_PATH="$GS/zig-out/lib" FANTASTTY_REMOTE_ADVERTISE_HOST=127.0.0.1 XDG_RUNTIME_DIR=/tmp/ins-remote-rt

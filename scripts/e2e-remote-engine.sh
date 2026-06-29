@@ -8,7 +8,7 @@
 # against the real unchanged helper.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
+GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 HELPER="${HELPER:-build/fantastty-helper}"
 [ -x "$HELPER" ] || HELPER=/tmp/fantastty-helper
 [ -x "$HELPER" ] || { echo "helper not built — run scripts/build-remote-helper.sh"; exit 1; }

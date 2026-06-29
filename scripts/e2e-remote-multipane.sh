@@ -6,7 +6,7 @@
 # The single-pane QUIC fetch itself is covered end-to-end by e2e-remote-gui.sh.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
+GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 DISP=":136"; SHOT="${OUT:-docs/images}/remote-multipane.png"
 [ -x build/insanitty ] || { echo "build the app first: scripts/build-app.sh"; exit 1; }
 export INSANITTY_REMOTE_FIXTURE="$PWD/scripts/fixtures/remote-2pane.jsonl"

@@ -13,7 +13,7 @@ INCDIR="$GHOSTTY/zig-out/include"
 RPATH="${RPATH:-$LIBDIR}"   # packaging overrides this to the install lib dir
 
 # msquic (in-process QUIC for the remote workspace). MSQUIC points at a built msquic checkout.
-MQ="${MSQUIC:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/msquic}"
+MQ="${MSQUIC:-$PWD/vendor/msquic}"   # where scripts/build-msquic.sh puts the build
 MQLIB="$MQ/build/bin/Release"
 OSSL_INC="${OSSL_INC:-$MQ/build/_deps/opensslquic-build/openssl/include}"
 MQRPATH="${MQRPATH:-$MQLIB}"   # packaging overrides this to the install lib dir

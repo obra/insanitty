@@ -4,7 +4,7 @@
 # Requires: Go >= 1.25, libghostty-vt built (scripts/build-ghostty.sh), cgo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
+GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 HELPER_SRC="${HELPER_SRC:-inspo/fantastty/tools/remote-engine-helper/helper}"
 [ -f "$GS/zig-out/lib/libghostty-vt.so" ] || { echo "libghostty-vt not built — run scripts/build-ghostty.sh"; exit 1; }
 [ -d "$HELPER_SRC" ] || { echo "helper source not found at $HELPER_SRC (set HELPER_SRC)"; exit 1; }

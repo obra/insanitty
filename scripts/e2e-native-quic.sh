@@ -4,8 +4,8 @@
 # with InsanittyCore.RemoteGridProtocol — the native transport, no Go-probe subprocess.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
-MQ="${MSQUIC:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/msquic}"
+GS="${GHOSTTY:-$PWD/vendor/ghostty}"
+MQ="${MSQUIC:-$PWD/vendor/msquic}"
 HELPER="${HELPER:-build/fantastty-helper}"; [ -x "$HELPER" ] || HELPER=/tmp/fantastty-helper
 [ -x build/quic-client ] || bash tools/quic-client/build.sh
 export LD_LIBRARY_PATH="$GS/zig-out/lib:$MQ/build/bin/Release" FANTASTTY_REMOTE_ADVERTISE_HOST=127.0.0.1

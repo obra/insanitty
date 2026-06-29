@@ -66,6 +66,8 @@ Done. Add the toolchains to your PATH (and persist in your shell rc):
   # swiftly's 'swift' proxy resolves the active toolchain; or use the toolchain bin directly:
   #   \$HOME/.local/share/swiftly/toolchains/<ver>/usr/bin
 
-Still needed manually (not in apt): msquic — build from https://github.com/microsoft/msquic
-(used by the remote engine; not required until Phase 3 / Spike C).
+Then build the native toolchains insanitty links against (both into vendor/, durable):
+  scripts/build-ghostty.sh   # libghostty-gtk + libghostty-vt + the embedding header
+  scripts/build-msquic.sh    # msquic (in-process QUIC for the remote workspace)
+  scripts/build-app.sh       # the app itself
 EOF
