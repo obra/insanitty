@@ -24,7 +24,7 @@ final class RemoteQuicFetcher {
     var inputPane = 0
     private var sendKeysBytes: [UInt8] = []; private var sendKeysBuf = QUIC_BUFFER()
     private var reqKfBytes: [UInt8] = [];    private var reqKfBuf = QUIC_BUFFER()
-    private var stream: OpaquePointer?       // the attach stream, kept to request a keyframe later
+    var stream: OpaquePointer?               // the attach stream, kept to request a keyframe later (set from remoteConnCb)
     let sem = DispatchSemaphore(value: 0)
     let lock = NSLock()
 
