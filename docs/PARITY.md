@@ -62,11 +62,11 @@ layout**; the richer per-workspace metadata is still absent.
 | Fantastty (`~/.fantastty/…`) | insanitty | Notes |
 |---|---|---|
 | `layout.json` — workspace/tab arrangement, browser URLs, selected tab | **PARTIAL** (`AppLayout`/`LayoutStore`, `Sources/InsanittyCore/AppLayout.swift`) | Persists the workspace list (names/order/indices), each workspace's browser-tab URLs, and the selected workspace to `$XDG_STATE_HOME/insanitty/layout.json`; restored on launch (reattaches tmux by index, recreates browser tabs). Verified `scripts/e2e-layout-persistence.sh`. Not yet: terminal-tab/split layout within a workspace (needs tmux control mode). |
-| `workspaces.json` — per-workspace metadata: name, notes (+revision history), tags, attention flag, `ticketURL`, `pullRequestURL`, `totalActiveSeconds`, archive/trash | **ABSENT** | |
-| `ssh-hosts.json` (note: appears vestigial even in Fantastty) | **ABSENT** | |
-| Idle-aware active-time tracking | **ABSENT** | |
-| Archive / trash workspaces | **ABSENT** | |
-| Session notes with edit history | **ABSENT** | |
+| `workspaces.json` — per-workspace metadata: name, notes (+revision history), tags, attention flag, `ticketURL`, `pullRequestURL`, `totalActiveSeconds`, archive/trash | **REAL** (`WorkspaceMetadata`/`WorkspaceMetadataStore`) | Full per-workspace model persisted to `$XDG_STATE_HOME/insanitty/workspaces.json` (JSON array, ISO-8601 dates) — keyed by `insanitty-ws-<index>`, tolerant decode, 6 unit tests. Mirrors Fantastty's `SessionMetadata` shape. |
+| `ssh-hosts.json` (note: appears vestigial even in Fantastty) | **ABSENT** | Vestigial in Fantastty; deferred. |
+| Idle-aware active-time tracking | **PARTIAL** (`totalActiveSeconds` in the model) | Field persisted; the focus-time accumulator is pending (#25). |
+| Archive / trash workspaces | **PARTIAL** (model: `setArchived`/`setTrashed` + stamps) | Persisted state + helpers done; sidebar archive/trash actions pending (#25). |
+| Session notes with edit history | **REAL** (`WorkspaceNote`, notes panel) | Per-workspace notes panel (text icon in the header): a timestamped log + an add field; edits keep a revision history (`updateContent`). Persisted to `workspaces.json`; verified end-to-end (`scripts/e2e-notes.sh`, `docs/images/e2e-9-notes.png`). |
 
 ## Remote engine (QUIC / SSH)
 

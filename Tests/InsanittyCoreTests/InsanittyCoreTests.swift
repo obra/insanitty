@@ -352,3 +352,67 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(url.path, "/tmp/xs/insanitty/settings.json")
     }
 }
+
+final class WorkspaceMetadataTests: XCTestCase {
+    private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    func testAppendNoteBumpsModified() {
+        var m = WorkspaceMetadata(workspaceID: "ws-0", createdAt: t0, modifiedAt: t0)
+        m.appendNote(content: "first", source: .user, at: t0.addingTimeInterval(10))
+        XCTAssertEqual(m.notes.count, 1)
+        XCTAssertEqual(m.notes[0].content, "first")
+        XCTAssertEqual(m.modifiedAt, t0.addingTimeInterval(10))
+    }
+
+    func testNoteEditKeepsHistory() {
+        var note = WorkspaceNote(timestamp: t0, content: "draft")
+        note.updateContent("final", at: t0.addingTimeInterval(5))
+        XCTAssertEqual(note.content, "final")
+        XCTAssertEqual(note.revisions.count, 1)
+        XCTAssertEqual(note.revisions[0].content, "draft")
+        // No-op edit doesn't add a revision.
+        note.updateContent("final", at: t0.addingTimeInterval(6))
+        XCTAssertEqual(note.revisions.count, 1)
+    }
+
+    func testArchiveAndTrashStamps() {
+        var m = WorkspaceMetadata(workspaceID: "ws-1", createdAt: t0, modifiedAt: t0)
+        m.setArchived(true, at: t0.addingTimeInterval(1))
+        XCTAssertTrue(m.isArchived); XCTAssertEqual(m.archivedAt, t0.addingTimeInterval(1))
+        m.setArchived(false, at: t0.addingTimeInterval(2))
+        XCTAssertFalse(m.isArchived); XCTAssertNil(m.archivedAt)
+        m.setTrashed(true, at: t0.addingTimeInterval(3))
+        XCTAssertTrue(m.isTrashed); XCTAssertEqual(m.trashedAt, t0.addingTimeInterval(3))
+    }
+
+    func testStoreRoundTrip() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ins-ws-\(UUID().uuidString)/workspaces.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var a = WorkspaceMetadata(workspaceID: "ws-a", name: "alpha", createdAt: t0, modifiedAt: t0)
+        a.appendNote(content: "hello", at: t0)
+        a.setArchived(true, at: t0)
+        a.totalActiveSeconds = 42
+        let b = WorkspaceMetadata(workspaceID: "ws-b", createdAt: t0, modifiedAt: t0)
+        try WorkspaceMetadataStore.save(["ws-a": a, "ws-b": b], to: url)
+        let loaded = WorkspaceMetadataStore.load(from: url)
+        XCTAssertEqual(loaded["ws-a"], a)
+        XCTAssertEqual(loaded["ws-b"], b)
+    }
+
+    func testStoreUsesIso8601Dates() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ins-ws8601-\(UUID().uuidString)/workspaces.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let m = WorkspaceMetadata(workspaceID: "ws", createdAt: t0, modifiedAt: t0)
+        try WorkspaceMetadataStore.save(["ws": m], to: url)
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(text.contains("2023-11-14T"), "expected ISO-8601 dates, got: \(text.prefix(200))")
+    }
+
+    func testLoadMissingIsEmpty() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ins-none-\(UUID().uuidString)/workspaces.json")
+        XCTAssertTrue(WorkspaceMetadataStore.load(from: url).isEmpty)
+    }
+}

@@ -26,6 +26,28 @@ nonisolated(unsafe) var remoteRendered = false   // true once the remote workspa
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 nonisolated(unsafe) var settingsURL = SettingsStore.defaultURL()
 nonisolated(unsafe) var currentSettings = SettingsStore.load(from: SettingsStore.defaultURL())
+nonisolated(unsafe) var workspacesURL = WorkspaceMetadataStore.defaultURL()
+nonisolated(unsafe) var workspaceMeta = WorkspaceMetadataStore.load(from: WorkspaceMetadataStore.defaultURL())
+
+/// Persist all workspace metadata (best-effort).
+func saveWorkspaceMeta() { try? WorkspaceMetadataStore.save(workspaceMeta, to: workspacesURL) }
+
+/// The persistence key for the selected workspace (`insanitty-ws-<index>`), or nil for the
+/// non-persisted "remote (QUIC)" demo (index -1).
+func currentWorkspaceID() -> String? {
+    guard currentWorkspace >= 0, currentWorkspace < tiles.count else { return nil }
+    let idx = tiles[currentWorkspace].index
+    return idx >= 0 ? "insanitty-ws-\(idx)" : nil
+}
+
+/// Metadata for a workspace id, creating (and registering) a default if absent.
+func metaFor(_ id: String) -> WorkspaceMetadata {
+    if let m = workspaceMeta[id] { return m }
+    let now = Date()
+    let m = WorkspaceMetadata(workspaceID: id, createdAt: now, modifiedAt: now)
+    workspaceMeta[id] = m
+    return m
+}
 
 /// Apply the appearance mode to the libadwaita chrome (sidebar/header bar light/dark). `.system`
 /// follows the desktop preference; `.light`/`.dark` force it.
@@ -821,6 +843,96 @@ func openSettings() {
 
 let settingsBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openSettings() }
 
+// MARK: - Session notes
+
+nonisolated(unsafe) var notesList: OpaquePointer?
+nonisolated(unsafe) var notesEntry: OpaquePointer?
+nonisolated(unsafe) var notesWorkspaceID = ""
+
+/// A note's timestamp as a short local date+time.
+func noteTimeLabel(_ date: Date) -> String {
+    let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .short
+    return f.string(from: date)
+}
+
+/// Rebuild the notes list from the current workspace's metadata (oldest first; edits flagged).
+func rebuildNotesList() {
+    guard let list = notesList else { return }
+    while let old = OP(gtk_widget_get_first_child(P(list))) { gtk_list_box_remove(P(list), P(old)) }
+    let notes = workspaceMeta[notesWorkspaceID]?.notes ?? []
+    if notes.isEmpty {
+        let row = OP(adw_action_row_new())
+        adw_preferences_row_set_title(P(row), "No notes yet")
+        gtk_list_box_append(P(list), P(row))
+        return
+    }
+    for note in notes {
+        let row = OP(adw_action_row_new())
+        adw_preferences_row_set_title(P(row), note.content)
+        var subtitle = noteTimeLabel(note.timestamp)
+        if !note.revisions.isEmpty { subtitle += "  · edited \(note.revisions.count)×" }
+        adw_action_row_set_subtitle(P(row), subtitle)
+        gtk_list_box_append(P(list), P(row))
+    }
+}
+
+/// Append the typed note to the current workspace, persist, refresh the list.
+let notesAddCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in
+    guard let entry = notesEntry, let cstr = gtk_editable_get_text(P(entry)) else { return }
+    let trimmed = String(cString: cstr).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    var m = metaFor(notesWorkspaceID)
+    m.appendNote(content: trimmed, source: .user, at: Date())
+    workspaceMeta[notesWorkspaceID] = m
+    saveWorkspaceMeta()
+    gtk_editable_set_text(P(entry), "")
+    rebuildNotesList()
+}
+
+/// Open the per-workspace notes panel: a scrolling log of timestamped notes plus an add field.
+func openNotes() {
+    guard let wsID = currentWorkspaceID() else { return }
+    notesWorkspaceID = wsID
+    let name = currentWorkspace < tiles.count ? tiles[currentWorkspace].name : wsID
+    let win = OP(adw_window_new())!
+    gtk_window_set_title(P(win), "Notes — \(name)")
+    if let mw = mainWindow { gtk_window_set_transient_for(P(win), P(mw)); gtk_window_set_modal(P(win), 1) }
+    gtk_window_set_default_size(P(win), 440, 520)
+
+    let toolbar = OP(adw_toolbar_view_new())
+    adw_toolbar_view_add_top_bar(P(toolbar), P(OP(adw_header_bar_new())))
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8))!
+    for set in [gtk_widget_set_margin_top, gtk_widget_set_margin_bottom, gtk_widget_set_margin_start, gtk_widget_set_margin_end] { set(P(vbox), 8) }
+
+    let scroll = OP(gtk_scrolled_window_new())
+    gtk_widget_set_vexpand(P(scroll), 1)
+    let list = OP(gtk_list_box_new())!
+    gtk_list_box_set_selection_mode(P(list), GTK_SELECTION_NONE)
+    gtk_widget_add_css_class(P(list), "boxed-list")
+    notesList = list
+    gtk_scrolled_window_set_child(P(scroll), P(list))
+    gtk_box_append(P(vbox), P(scroll))
+
+    let addBox = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6))!
+    let entry = OP(gtk_entry_new())!
+    gtk_widget_set_hexpand(P(entry), 1)
+    gtk_entry_set_placeholder_text(P(entry), "Add a note…")
+    g_signal_connect_data(raw(entry), "activate", unsafeBitCast(notesAddCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    notesEntry = entry
+    let addBtn = OP(gtk_button_new_with_label("Add"))!
+    gtk_widget_add_css_class(P(addBtn), "suggested-action")
+    g_signal_connect_data(raw(addBtn), "clicked", unsafeBitCast(notesAddCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_box_append(P(addBox), P(entry)); gtk_box_append(P(addBox), P(addBtn))
+    gtk_box_append(P(vbox), P(addBox))
+
+    adw_toolbar_view_set_content(P(toolbar), P(vbox))
+    adw_window_set_content(P(win), P(toolbar))
+    rebuildNotesList()
+    gtk_window_present(P(win))
+}
+
+let notesBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openNotes() }
+
 /// Persist the layout when the window is closing (returns PROPAGATE so the close proceeds).
 let closeRequestCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> gboolean = { _, _ in
     saveLayout(); return 0
@@ -897,6 +1009,10 @@ func buildWindow() {
     gtk_widget_set_tooltip_text(P(overviewBtn), "Overview (Ctrl+O)")
     g_signal_connect_data(raw(overviewBtn), "clicked", unsafeBitCast(overviewBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
     adw_header_bar_pack_start(P(header), P(overviewBtn))
+    let notesBtn = OP(gtk_button_new_from_icon_name("accessories-text-editor-symbolic"))!
+    gtk_widget_set_tooltip_text(P(notesBtn), "Workspace notes")
+    g_signal_connect_data(raw(notesBtn), "clicked", unsafeBitCast(notesBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_header_bar_pack_start(P(header), P(notesBtn))
     let settingsBtn = OP(gtk_button_new_from_icon_name("emblem-system-symbolic"))!
     gtk_widget_set_tooltip_text(P(settingsBtn), "Settings")
     g_signal_connect_data(raw(settingsBtn), "clicked", unsafeBitCast(settingsBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
