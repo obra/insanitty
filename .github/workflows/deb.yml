@@ -89,6 +89,10 @@ jobs:
           export LD_LIBRARY_PATH="$RUNNER_TEMP/ghostty/zig-out/lib:$RUNNER_TEMP/msquic/build/bin/Release"
           ./scripts/e2e-scenario.sh
           ./scripts/e2e-layout-persistence.sh
+          ./scripts/e2e-settings.sh
+          ./scripts/e2e-notes.sh
+          ./scripts/e2e-archive.sh
+          ./scripts/e2e-osc.sh
           ./scripts/e2e-remote-multipane.sh
           ./scripts/e2e-remote-gui.sh
           ./scripts/e2e-remote-live.sh
