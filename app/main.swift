@@ -122,11 +122,7 @@ nonisolated(unsafe) var sidebarList: OpaquePointer?
 nonisolated(unsafe) var currentWorkspace = 0
 nonisolated(unsafe) var overviewBox: OpaquePointer?   // Exposé overlay (hidden until toggled)
 nonisolated(unsafe) var overviewFlow: OpaquePointer?  // the GtkFlowBox of workspace tiles
-nonisolated(unsafe) var ctrlClient: TmuxControlClient?   // live tmux -CC client (demo workspace)
-nonisolated(unsafe) var ctrlPaneSurfaces: [Int: OpaquePointer] = [:]  // tmux pane id → surface
-nonisolated(unsafe) var ctrlTabView: OpaquePointer?        // AdwTabView: one tab per tmux window
-nonisolated(unsafe) var ctrlWindowContainers: [Int: OpaquePointer] = [:]  // window id → pane-tree box
-nonisolated(unsafe) var ctrlWindowPanes: [Int: Set<Int>] = [:]  // window id → its current panes
+nonisolated(unsafe) var controlWorkspaces: [Int: ControlModeWorkspace] = [:]  // tmux index → control-mode workspace
 
 /// A live terminal pane that expands to fill its slot. If `command` is given, the surface
 /// runs it instead of the default shell (used for tmux-backed workspaces).
@@ -607,24 +603,14 @@ func encodeTmuxKey(keyval: guint, state: GdkModifierType) -> [UInt8]? {
     return Array(String(scalar).utf8)
 }
 
-/// Key pressed on the tmux -CC surface → forward to the control session's active pane.
-let ctrlKeyCb: @convention(c) (OpaquePointer?, guint, guint, GdkModifierType, UnsafeMutableRawPointer?) -> gboolean = { _, keyval, _, state, _ in
-    guard let client = ctrlClient, let pane = client.inputPane,
-          let bytes = encodeTmuxKey(keyval: keyval, state: state) else { return 0 }
-    client.sendKeys(pane: pane, bytes: bytes)
+/// Key pressed on a tmux -CC pane surface → forward to that workspace's active pane. The owning
+/// ControlModeWorkspace is the controller's user_data, so each workspace routes to its own client.
+let ctrlKeyCb: @convention(c) (OpaquePointer?, guint, guint, GdkModifierType, UnsafeMutableRawPointer?) -> gboolean = { _, keyval, _, state, ud in
+    guard let ud = ud else { return 0 }
+    let ws = Unmanaged<ControlModeWorkspace>.fromOpaque(ud).takeUnretainedValue()
+    guard let pane = ws.client.inputPane, let bytes = encodeTmuxKey(keyval: keyval, state: state) else { return 0 }
+    ws.client.sendKeys(pane: pane, bytes: bytes)
     return 1
-}
-
-/// A silent control-mode pane surface (renders only injected output) with a key controller that
-/// forwards keystrokes to the active pane. Ref-sunk so it survives re-parenting across relayouts.
-func makeControlPaneSurface() -> OpaquePointer? {
-    guard let s = makeSilentTerminal() else { return nil }
-    g_object_ref_sink(raw(s))
-    let kc = OP(gtk_event_controller_key_new())
-    gtk_event_controller_set_propagation_phase(P(kc), GTK_PHASE_CAPTURE)
-    g_signal_connect_data(raw(kc), "key-pressed", unsafeBitCast(ctrlKeyCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
-    gtk_widget_add_controller(P(s), P(kc))
-    return s
 }
 
 /// Build the widget for a pane layout: a leaf → its surface (via `surfaceFor`), a split → a
@@ -653,67 +639,121 @@ func buildPaned(_ orientation: GtkOrientation, _ kids: [TmuxLayoutNode], _ surfa
     return acc
 }
 
-/// Ensure a tab + pane-tree container exists for tmux window `window`; return its container.
-func ensureWindowTab(_ window: Int) -> OpaquePointer? {
-    if let c = ctrlWindowContainers[window] { return c }
-    guard let tabView = ctrlTabView else { return nil }
-    let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
-    gtk_widget_set_vexpand(P(box), 1)
-    ctrlWindowContainers[window] = box
-    let page = OP(adw_tab_view_append(P(tabView), P(box)))!
-    adw_tab_page_set_title(P(page), "window @\(window)")
-    return box
-}
+/// One workspace driven by tmux control mode (`tmux -CC`): each tmux window is a tab, each tmux
+/// pane a split surface. Owns the per-workspace control state (formerly global) so every workspace
+/// can run its own session — splits become real tmux panes and the layout persists in tmux.
+final class ControlModeWorkspace {
+    let client: TmuxControlClient
+    let tabView: OpaquePointer
+    var windowContainers: [Int: OpaquePointer] = [:]
+    var windowPanes: [Int: Set<Int>] = [:]
+    var paneSurfaces: [Int: OpaquePointer] = [:]
 
-/// Lay out a tmux window's panes (its tab) as a GtkPaned tree of silent surfaces, reusing
-/// surfaces across relayouts (kept alive by the dict's ref) so pane content persists.
-func rebuildWindowPanes(_ window: Int, _ tree: TmuxLayoutNode) {
-    guard let container = ensureWindowTab(window) else { return }
-    let newPanes = Set(tree.allPanes())
-    let oldPanes = ctrlWindowPanes[window] ?? []
-    if newPanes == oldPanes { return }   // same panes, only sizes changed
-    ctrlWindowPanes[window] = newPanes
-    // Detach this window's surfaces (the dict keeps them alive), then drop the old tree.
-    for pane in oldPanes.union(newPanes) {
-        if let s = ctrlPaneSurfaces[pane], gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+    init(session: String, tabView: OpaquePointer) {
+        client = TmuxControlClient(session: session)
+        self.tabView = tabView
+        client.surfaceForPane = { [unowned self] pane in
+            if paneSurfaces[pane] == nil { paneSurfaces[pane] = makePaneSurface() }
+            return paneSurfaces[pane]
+        }
+        client.onLayout = { [unowned self] window, tree in rebuildWindowPanes(window, tree) }
+        client.onWindowClose = { [unowned self] window in closeWindowTab(window) }
     }
-    while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
-    let widget = buildPaneTree(tree) { pane in
-        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = makeControlPaneSurface() }
-        return ctrlPaneSurfaces[pane]
+
+    /// A silent pane surface whose keystrokes route to THIS workspace's client (user_data = self).
+    func makePaneSurface() -> OpaquePointer? {
+        guard let s = makeSilentTerminal() else { return nil }
+        g_object_ref_sink(raw(s))
+        let kc = OP(gtk_event_controller_key_new())
+        gtk_event_controller_set_propagation_phase(P(kc), GTK_PHASE_CAPTURE)
+        g_signal_connect_data(raw(kc), "key-pressed", unsafeBitCast(ctrlKeyCb, to: GCallback.self),
+                              Unmanaged.passUnretained(self).toOpaque(), nil, GConnectFlags(rawValue: 0))
+        gtk_widget_add_controller(P(s), P(kc))
+        return s
     }
-    if let widget = widget { gtk_box_append(P(container), P(widget)) }
-    // Release surfaces for panes that closed in this window.
-    for pane in oldPanes.subtracting(newPanes) {
-        if let s = ctrlPaneSurfaces.removeValue(forKey: pane) {
-            if gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
-            g_object_unref(raw(s))
+
+    /// Ensure a tab + pane-tree container exists for tmux window `window`; return its container.
+    func ensureWindowTab(_ window: Int) -> OpaquePointer? {
+        if let c = windowContainers[window] { return c }
+        let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
+        gtk_widget_set_vexpand(P(box), 1)
+        windowContainers[window] = box
+        let page = OP(adw_tab_view_append(P(tabView), P(box)))!
+        adw_tab_page_set_title(P(page), "window @\(window)")
+        return box
+    }
+
+    /// Lay out a tmux window's panes (its tab) as a GtkPaned tree of silent surfaces, reusing
+    /// surfaces across relayouts so pane content persists.
+    func rebuildWindowPanes(_ window: Int, _ tree: TmuxLayoutNode) {
+        guard let container = ensureWindowTab(window) else { return }
+        let newPanes = Set(tree.allPanes())
+        let oldPanes = windowPanes[window] ?? []
+        if newPanes == oldPanes { return }   // same panes, only sizes changed
+        windowPanes[window] = newPanes
+        for pane in oldPanes.union(newPanes) {
+            if let s = paneSurfaces[pane], gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+        }
+        while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
+        let widget = buildPaneTree(tree) { pane in
+            if paneSurfaces[pane] == nil { paneSurfaces[pane] = makePaneSurface() }
+            return paneSurfaces[pane]
+        }
+        if let widget = widget { gtk_box_append(P(container), P(widget)) }
+        for pane in oldPanes.subtracting(newPanes) {
+            if let s = paneSurfaces.removeValue(forKey: pane) {
+                if gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+                g_object_unref(raw(s))
+            }
+        }
+        FileHandle.standardError.write(Data("tmux-cc: window @\(window) → \(newPanes.count)-pane layout\n".utf8))
+    }
+
+    /// A tmux window closed → remove its tab and release its pane surfaces.
+    func closeWindowTab(_ window: Int) {
+        for pane in windowPanes[window] ?? [] {
+            if let s = paneSurfaces.removeValue(forKey: pane) {
+                if gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+                g_object_unref(raw(s))
+            }
+        }
+        windowPanes.removeValue(forKey: window)
+        if let container = windowContainers[window],
+           let page = OP(adw_tab_view_get_page(P(tabView), P(container))) {
+            adw_tab_view_close_page(P(tabView), P(page))
+        }
+        windowContainers.removeValue(forKey: window)
+    }
+
+    /// Query existing windows once (after attach) and build a tab per window from its layout.
+    func buildExistingWindows() {
+        for line in shellOutput("tmux list-windows -t \(client.session) -F '#{window_id} #{window_layout}'")
+            .split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2, parts[0].hasPrefix("@"), let window = Int(parts[0].dropFirst()),
+                  let tree = TmuxLayoutParser.parse(String(parts[1])) else { continue }
+            rebuildWindowPanes(window, tree)
         }
     }
-    FileHandle.standardError.write(Data("tmux-cc: window @\(window) → \(newPanes.count)-pane layout\n".utf8))
 }
 
-/// A tmux window closed → remove its tab and release its pane surfaces.
-func closeWindowTab(_ window: Int) {
-    for pane in ctrlWindowPanes[window] ?? [] {
-        if let s = ctrlPaneSurfaces.removeValue(forKey: pane) {
-            if gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
-            g_object_unref(raw(s))
-        }
+/// Start a control-mode workspace's client once its container has realized, sizing tmux to it.
+/// `user_data` is the ControlModeWorkspace (kept alive by `controlWorkspaces`).
+let ctrlStartCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { ud in
+    guard let ud = ud else { return 0 }
+    let ws = Unmanaged<ControlModeWorkspace>.fromOpaque(ud).takeUnretainedValue()
+    let w = Int(gtk_widget_get_width(P(ws.tabView))), h = Int(gtk_widget_get_height(P(ws.tabView)))
+    if w > 0, h > 0 {
+        ws.client.sizeCols = max(40, min(400, w / 8))   // ~8px per cell column
+        ws.client.sizeRows = max(10, min(200, h / 17))  // ~17px per cell row
     }
-    ctrlWindowPanes.removeValue(forKey: window)
-    if let tabView = ctrlTabView, let container = ctrlWindowContainers[window],
-       let page = OP(adw_tab_view_get_page(P(tabView), P(container))) {
-        adw_tab_view_close_page(P(tabView), P(page))
-    }
-    ctrlWindowContainers.removeValue(forKey: window)
+    ws.client.start(); return 0
 }
 
-/// A "tmux -CC" workspace: insanitty owns the `tmux -CC` control session and renders its pane by
-/// injecting the control protocol's %output into a silent surface (TmuxControlClient). A live
-/// demonstration of tmux control mode; env-gated (INSANITTY_TMUX_CC) so it stays out of the way.
-func makeControlModeWorkspacePage() -> OpaquePointer? {
-    runDetached("tmux new-session -A -d -s insanitty-cc")
+/// A tmux control-mode workspace: insanitty owns `tmux -CC` for `session`, mapping its windows to
+/// tabs and panes to splits (so splits are real tmux panes and the layout persists in tmux).
+func makeControlModeWorkspacePage(session: String, index: Int) -> OpaquePointer? {
+    runDetached("tmux new-session -A -d -s \(session)")
     let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
     let tabView = OP(adw_tab_view_new())!
     gtk_widget_set_vexpand(P(tabView), 1)
@@ -722,44 +762,14 @@ func makeControlModeWorkspacePage() -> OpaquePointer? {
     gtk_box_append(P(vbox), P(tabBar))
     gtk_box_append(P(vbox), P(tabView))
 
-    // Each tmux window becomes a tab; ensureWindowTab() fills this AdwTabView on demand.
-    ctrlTabView = tabView
-
-    let client = TmuxControlClient(session: "insanitty-cc")
+    let ws = ControlModeWorkspace(session: session, tabView: tabView)
+    controlWorkspaces[index] = ws
     // Query the session's pane id so keystrokes work before the first %output arrives.
-    let paneRaw = shellOutput("tmux list-panes -t insanitty-cc -F '#{pane_id}' | head -1")
+    let paneRaw = shellOutput("tmux list-panes -t \(session) -F '#{pane_id}' | head -1")
         .trimmingCharacters(in: .whitespacesAndNewlines)
-    if paneRaw.hasPrefix("%") { client.defaultPane = Int(paneRaw.dropFirst()) }
-    client.surfaceForPane = { pane in
-        if ctrlPaneSurfaces[pane] == nil { ctrlPaneSurfaces[pane] = makeControlPaneSurface() }
-        return ctrlPaneSurfaces[pane]
-    }
-    client.onLayout = { window, tree in rebuildWindowPanes(window, tree) }
-    client.onWindowClose = { window in closeWindowTab(window) }
-    ctrlClient = client
-
-    // Build a tab per existing tmux window from its layout (windows → tabs, panes → splits).
-    for line in shellOutput("tmux list-windows -t insanitty-cc -F '#{window_id} #{window_layout}'")
-        .split(separator: "\n") {
-        let parts = line.split(separator: " ", maxSplits: 1)
-        guard parts.count == 2, parts[0].hasPrefix("@"), let window = Int(parts[0].dropFirst()),
-              let tree = TmuxLayoutParser.parse(String(parts[1])) else { continue }
-        rebuildWindowPanes(window, tree)
-    }
-
-    // Start the control client once the surfaces have realized; it then injects tmux output.
-    // Estimate the window's cell size from the realized container so tmux sizes panes to match.
-    let startCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
-        if let c = ctrlTabView {
-            let w = Int(gtk_widget_get_width(P(c))), h = Int(gtk_widget_get_height(P(c)))
-            if w > 0, h > 0 {
-                ctrlClient?.sizeCols = max(40, min(400, w / 8))   // ~8px per cell column
-                ctrlClient?.sizeRows = max(10, min(200, h / 17))  // ~17px per cell row
-            }
-        }
-        ctrlClient?.start(); return 0
-    }
-    g_timeout_add(1500, startCb, nil)
+    if paneRaw.hasPrefix("%") { ws.client.defaultPane = Int(paneRaw.dropFirst()) }
+    ws.buildExistingWindows()
+    g_timeout_add(1500, ctrlStartCb, Unmanaged.passUnretained(ws).toOpaque())
     return vbox
 }
 
@@ -1123,7 +1133,7 @@ func buildWindow() {
     registerWorkspace(makeRemoteWorkspacePage()!, name: "remote (QUIC)", id: "remote", index: -1)
     // Optional live tmux control-mode demo workspace (kept out of normal launches).
     if ProcessInfo.processInfo.environment["INSANITTY_TMUX_CC"] != nil {
-        registerWorkspace(makeControlModeWorkspacePage()!, name: "tmux -CC", id: "ctrl", index: -2)
+        registerWorkspace(makeControlModeWorkspacePage(session: "insanitty-cc", index: -2)!, name: "tmux -CC", id: "ctrl", index: -2)
     }
 
     let sidebarScroll = OP(gtk_scrolled_window_new())
