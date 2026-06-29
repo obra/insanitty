@@ -93,6 +93,7 @@ jobs:
           ./scripts/e2e-notes.sh
           ./scripts/e2e-archive.sh
           ./scripts/e2e-osc.sh
+          ./scripts/e2e-layout-restore.sh
           ./scripts/e2e-remote-multipane.sh
           ./scripts/e2e-remote-gui.sh
           ./scripts/e2e-remote-live.sh
