@@ -30,9 +30,10 @@ counter kept advancing while the app was dead, relaunches, and confirms the work
 headline "sessions survive restart" feature, robustly verified (a process outlived the app).
 
 Features working (Fantastty's full structure — workspace → tabs → splits → panes):
-workspaces (sidebar + switching), **tabs** (Ctrl+T, AdwTabBar/AdwTabView), **splits**
-(Ctrl+D right / Ctrl+Shift+D down, focus-aware), **tmux-backed persistent sessions**, live
-terminals with interactive I/O. Screenshots in `docs/images/`.
+workspaces (sidebar + switching), **terminal + browser tabs** (Ctrl+T / Ctrl+B; AdwTabView +
+WebKitGTK — `docs/images/e2e-6-browser.png`), **splits** (Ctrl+D right / Ctrl+Shift+D down,
+focus-aware), **tmux-backed persistent sessions**, live terminals with interactive I/O.
+Screenshots in `docs/images/`.
 Not yet (deferred): the full tmux **control-mode** mapping (tmux windows↔tabs, panes↔splits
 within ONE session per workspace — currently each workspace attaches its own session, splits
 are local panes); notes/URLs/Linear/sprites/browser; the remote engine (Spike C / msquic —

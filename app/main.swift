@@ -94,12 +94,29 @@ func addTab(to tabView: OpaquePointer?, command: String? = nil) {
     adw_tab_view_set_selected_page(P(tabView), P(page))
 }
 
-/// New tab in the currently visible workspace (its AdwTabView is the page box's last child).
-func newTabInCurrentWorkspace() {
+/// The AdwTabView of the currently visible workspace (the page box's last child).
+func currentTabView() -> OpaquePointer? {
     guard let stack = mainStack,
-          let page = OP(gtk_stack_get_visible_child(P(stack))),
-          let tabView = OP(gtk_widget_get_last_child(P(page))) else { return }
-    addTab(to: tabView)
+          let page = OP(gtk_stack_get_visible_child(P(stack))) else { return nil }
+    return OP(gtk_widget_get_last_child(P(page)))
+}
+
+/// New terminal tab in the current workspace.
+func newTabInCurrentWorkspace() { addTab(to: currentTabView()) }
+
+/// New WebKitGTK browser tab in the current workspace (Fantastty has browser tabs).
+func newBrowserTabInCurrentWorkspace() {
+    guard let tabView = currentTabView() else { return }
+    let web = OP(webkit_web_view_new())
+    gtk_widget_set_hexpand(P(web), 1)
+    gtk_widget_set_vexpand(P(web), 1)
+    let html = "<html><body style='background:#1e1e2e;color:#cdd6f4;font-family:sans-serif;"
+        + "padding:48px'><h1>insanitty browser</h1><p>A WebKitGTK browser tab, embedded "
+        + "alongside terminal tabs.</p><p>INSANITTY-BROWSER-OK</p></body></html>"
+    webkit_web_view_load_html(P(web), html, nil)
+    let tabPage = OP(adw_tab_view_append(P(tabView), P(web)))
+    adw_tab_page_set_title(P(tabPage), "Browser")
+    adw_tab_view_set_selected_page(P(tabView), P(tabPage))
 }
 
 /// One workspace page: a tab bar over an AdwTabView of terminal tabs. The first tab is
@@ -158,6 +175,10 @@ func buildWindow() {
         }
         if ctrl && (keyval == GDK_KEY_t || keyval == GDK_KEY_T) {
             newTabInCurrentWorkspace()
+            return 1
+        }
+        if ctrl && (keyval == GDK_KEY_b || keyval == GDK_KEY_B) {
+            newBrowserTabInCurrentWorkspace()
             return 1
         }
         return 0

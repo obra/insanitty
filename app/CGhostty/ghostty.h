@@ -1,7 +1,8 @@
 #ifndef INSANITTY_APP_CGHOSTTY_H
 #define INSANITTY_APP_CGHOSTTY_H
-/* GTK4 + libadwaita + the libghostty-gtk embedding C ABI, imported into Swift. */
+/* GTK4 + libadwaita + WebKitGTK + the libghostty-gtk embedding C ABI, imported into Swift. */
 #include <adwaita.h>
+#include <webkit/webkit.h>
 #include <insanitty.h>
 
 /* GObject signal connect that performs the G_CALLBACK cast Swift can't express.

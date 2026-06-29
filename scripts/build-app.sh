@@ -18,9 +18,10 @@ mkdir -p build
 echo "Compiling insanitty (swiftc $($SWIFTC --version 2>/dev/null | head -1))..."
 "$SWIFTC" -O \
   -I app/CGhostty -I "$INCDIR" \
-  $(pkg-config --cflags-only-I libadwaita-1 | sed 's/-I/-Xcc -I/g') \
+  $(pkg-config --cflags-only-I libadwaita-1 webkitgtk-6.0 | sed 's/-I/-Xcc -I/g') \
   Sources/InsanittyCore/*.swift app/*.swift \
-  -L "$LIBDIR" -lghostty-gtk $(pkg-config --libs libadwaita-1) \
+  -L "$LIBDIR" -lghostty-gtk \
+  $(pkg-config --libs libadwaita-1 webkitgtk-6.0 | tr ' ' '\n' | grep -E '^-[lL]' | tr '\n' ' ') \
   -Xlinker -rpath -Xlinker "$LIBDIR" \
   -o build/insanitty
 echo "Built build/insanitty"
