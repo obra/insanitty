@@ -955,6 +955,114 @@ func openAttach() {
 
 let attachBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openAttach() }
 
+// MARK: - Sprites (Fly.io sprite CLI)
+
+nonisolated(unsafe) var spriteWindow: OpaquePointer?
+nonisolated(unsafe) var spriteList: OpaquePointer?
+nonisolated(unsafe) var spriteNameEntry: OpaquePointer?
+
+/// The resolved `sprite` CLI path, or nil if not installed.
+func spriteCLIPath() -> String? {
+    SpriteCommands.resolvePath(home: NSHomeDirectory()) { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
+/// `sprite list` → trimmed, non-empty lines (sprite names).
+func spriteListOutput() -> [String] {
+    guard let path = spriteCLIPath(), let data = runProcess(path, SpriteCommands.listArgv) else { return [] }
+    return String(decoding: data, as: UTF8.self).split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+}
+
+/// Connect to a sprite as a new workspace: a control-mode tmux session whose pane runs the console.
+func connectSprite(_ name: String) {
+    guard let list = sidebarList, !name.isEmpty else { return }
+    let path = spriteCLIPath() ?? "sprite"
+    let session = "insanitty-sprite-\(name)"
+    runDetached("tmux new-session -A -d -s \(session) '\(SpriteCommands.consoleCommand(spritePath: path, name: name))'")
+    let idx = workspaceCounter; workspaceCounter += 1
+    guard let page = makeControlModeWorkspacePage(session: session, index: idx, create: false) else { return }
+    let tileIdx = registerWorkspace(page, name: "sprite:\(name)", id: "sprite-\(idx)", index: idx)
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(tileIdx)))))
+}
+
+/// (Re)list sprites into the picker (or a hint if the CLI is missing).
+let spriteRefreshCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in
+    guard let list = spriteList else { return }
+    while let old = OP(gtk_widget_get_first_child(P(list))) { gtk_list_box_remove(P(list), P(old)) }
+    let addHint: (String) -> Void = { text in
+        let row = OP(adw_action_row_new()); adw_preferences_row_set_title(P(row), text); gtk_list_box_append(P(list), P(row))
+    }
+    guard spriteCLIPath() != nil else { addHint("sprite CLI not found — install the Fly.io sprite CLI"); return }
+    let sprites = spriteListOutput()
+    if sprites.isEmpty { addHint("No sprites — create one above"); return }
+    for s in sprites {
+        let row = OP(adw_action_row_new()); adw_preferences_row_set_title(P(row), s); gtk_list_box_append(P(list), P(row))
+    }
+}
+
+/// Picked a sprite → connect it as a workspace.
+let spriteRowCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, rowPtr, _ in
+    guard let row = rowPtr, let cstr = adw_preferences_row_get_title(P(row)) else { return }
+    let name = String(cString: cstr)
+    guard !name.contains("sprite CLI"), !name.hasPrefix("No sprites") else { return }
+    connectSprite(name)
+    if let w = spriteWindow { gtk_window_close(P(w)) }
+}
+
+/// Create a new sprite (`sprite create [name]`) and connect it.
+let spriteCreateCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in
+    guard let path = spriteCLIPath() else { return }
+    let name = spriteNameEntry.flatMap { gtk_editable_get_text(P($0)) }.map { String(cString: $0) } ?? ""
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let data = runProcess(path, SpriteCommands.createArgv(name: trimmed.isEmpty ? nil : trimmed)) else { return }
+    let created = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        .split(separator: "\n").last.map(String.init) ?? trimmed
+    guard !created.isEmpty, created != "unknown" else { return }
+    connectSprite(created)
+    if let w = spriteWindow { gtk_window_close(P(w)) }
+}
+
+/// Open the sprites picker: create a sprite, or connect to an existing one.
+func openSprites() {
+    let win = OP(adw_window_new())!
+    spriteWindow = win
+    gtk_window_set_title(P(win), "Sprites")
+    if let mw = mainWindow { gtk_window_set_transient_for(P(win), P(mw)); gtk_window_set_modal(P(win), 1) }
+    gtk_window_set_default_size(P(win), 440, 460)
+    let toolbar = OP(adw_toolbar_view_new())
+    adw_toolbar_view_add_top_bar(P(toolbar), P(OP(adw_header_bar_new())))
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8))!
+    for set in [gtk_widget_set_margin_top, gtk_widget_set_margin_bottom, gtk_widget_set_margin_start, gtk_widget_set_margin_end] { set(P(vbox), 8) }
+
+    let createBox = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6))!
+    let entry = OP(gtk_entry_new())!
+    gtk_widget_set_hexpand(P(entry), 1)
+    gtk_entry_set_placeholder_text(P(entry), "New sprite name (optional)")
+    spriteNameEntry = entry
+    g_signal_connect_data(raw(entry), "activate", unsafeBitCast(spriteCreateCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    let createBtn = OP(gtk_button_new_with_label("Create & Connect"))!
+    gtk_widget_add_css_class(P(createBtn), "suggested-action")
+    g_signal_connect_data(raw(createBtn), "clicked", unsafeBitCast(spriteCreateCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_box_append(P(createBox), P(entry)); gtk_box_append(P(createBox), P(createBtn))
+    gtk_box_append(P(vbox), P(createBox))
+
+    let scroll = OP(gtk_scrolled_window_new())
+    gtk_widget_set_vexpand(P(scroll), 1)
+    let list = OP(gtk_list_box_new())!
+    gtk_list_box_set_selection_mode(P(list), GTK_SELECTION_NONE)
+    gtk_widget_add_css_class(P(list), "boxed-list")
+    spriteList = list
+    g_signal_connect_data(raw(list), "row-activated", unsafeBitCast(spriteRowCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_scrolled_window_set_child(P(scroll), P(list))
+    gtk_box_append(P(vbox), P(scroll))
+
+    adw_toolbar_view_set_content(P(toolbar), P(vbox))
+    adw_window_set_content(P(win), P(toolbar))
+    spriteRefreshCb(nil, nil)
+    gtk_window_present(P(win))
+}
+
+let spritesBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openSprites() }
+
 /// Run a process (optionally feeding stdin) and return its stdout, or nil on failure.
 func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data? {
     let p = Process()
@@ -1365,6 +1473,10 @@ func buildWindow() {
     gtk_widget_set_tooltip_text(P(attachBtn), "Attach to a tmux session (local or SSH)")
     g_signal_connect_data(raw(attachBtn), "clicked", unsafeBitCast(attachBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
     adw_header_bar_pack_start(P(header), P(attachBtn))
+    let spritesBtn = OP(gtk_button_new_from_icon_name("cloud-symbolic"))!
+    gtk_widget_set_tooltip_text(P(spritesBtn), "Sprites (Fly.io)")
+    g_signal_connect_data(raw(spritesBtn), "clicked", unsafeBitCast(spritesBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_header_bar_pack_start(P(header), P(spritesBtn))
     let settingsBtn = OP(gtk_button_new_from_icon_name("emblem-system-symbolic"))!
     gtk_widget_set_tooltip_text(P(settingsBtn), "Settings")
     g_signal_connect_data(raw(settingsBtn), "clicked", unsafeBitCast(settingsBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))

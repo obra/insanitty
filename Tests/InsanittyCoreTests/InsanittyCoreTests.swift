@@ -439,3 +439,21 @@ final class SSHTargetTests: XCTestCase {
                        ["ssh", "-t", "box", "tmux", "-CC", "attach-session", "-t", "s"])
     }
 }
+
+final class SpriteCommandsTests: XCTestCase {
+    func testArgv() {
+        XCTAssertEqual(SpriteCommands.listArgv, ["list"])
+        XCTAssertEqual(SpriteCommands.createArgv(name: nil), ["create"])
+        XCTAssertEqual(SpriteCommands.createArgv(name: "box"), ["create", "box"])
+        XCTAssertEqual(SpriteCommands.destroyArgv(name: "box"), ["destroy", "-s", "box", "-f"])
+        XCTAssertEqual(SpriteCommands.consoleCommand(spritePath: "/usr/local/bin/sprite", name: "box"),
+                       "/usr/local/bin/sprite console -s \"box\"")
+    }
+    func testResolvePath() {
+        let home = "/home/u"
+        // Picks the first existing candidate in priority order.
+        XCTAssertEqual(SpriteCommands.resolvePath(home: home) { $0 == "/usr/local/bin/sprite" }, "/usr/local/bin/sprite")
+        XCTAssertEqual(SpriteCommands.resolvePath(home: home) { _ in true }, "/home/u/.local/bin/sprite")
+        XCTAssertNil(SpriteCommands.resolvePath(home: home) { _ in false })
+    }
+}
