@@ -19,9 +19,15 @@ nonisolated(unsafe) var mainStack: OpaquePointer?
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
 nonisolated(unsafe) var surfaces = Set<OpaquePointer>()
 
-/// A live terminal pane that expands to fill its slot.
-func makeTerminal() -> OpaquePointer? {
-    let term = OP(insanitty_surface_new())
+/// A live terminal pane that expands to fill its slot. If `command` is given, the surface
+/// runs it instead of the default shell (used for tmux-backed workspaces).
+func makeTerminal(_ command: String? = nil) -> OpaquePointer? {
+    let term: OpaquePointer?
+    if let c = command {
+        term = OP(c.withCString { insanitty_surface_new_command($0) })
+    } else {
+        term = OP(insanitty_surface_new())
+    }
     gtk_widget_set_hexpand(P(term), 1)
     gtk_widget_set_vexpand(P(term), 1)
     if let t = term { surfaces.insert(t) }
@@ -75,15 +81,15 @@ func splitFocused(_ orientation: GtkOrientation) {
 }
 
 /// A tab's content root: a box wrapping a terminal (which can split into a GtkPaned tree).
-func makeSplitRoot() -> OpaquePointer? {
+func makeSplitRoot(_ command: String? = nil) -> OpaquePointer? {
     let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
-    gtk_box_append(P(box), P(makeTerminal()))
+    gtk_box_append(P(box), P(makeTerminal(command)))
     return box
 }
 
 /// Add a terminal tab to a workspace's AdwTabView and select it.
-func addTab(to tabView: OpaquePointer?) {
-    let page = OP(adw_tab_view_append(P(tabView), P(makeSplitRoot())))
+func addTab(to tabView: OpaquePointer?, command: String? = nil) {
+    let page = OP(adw_tab_view_append(P(tabView), P(makeSplitRoot(command))))
     adw_tab_page_set_title(P(page), "Terminal")
     adw_tab_view_set_selected_page(P(tabView), P(page))
 }
@@ -96,8 +102,10 @@ func newTabInCurrentWorkspace() {
     addTab(to: tabView)
 }
 
-/// One workspace page: a tab bar over an AdwTabView of terminal tabs.
-func makeWorkspacePage() -> OpaquePointer? {
+/// One workspace page: a tab bar over an AdwTabView of terminal tabs. The first tab is
+/// backed by a per-workspace tmux session (`tmux new-session -A -s insanitty-ws-N`), so its
+/// shell + scrollback + running programs survive app restarts ("persistent sessions").
+func makeWorkspacePage(index: Int) -> OpaquePointer? {
     let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
     let tabView = OP(adw_tab_view_new())
     gtk_widget_set_vexpand(P(tabView), 1)
@@ -105,7 +113,7 @@ func makeWorkspacePage() -> OpaquePointer? {
     adw_tab_bar_set_view(P(tabBar), P(tabView))
     gtk_box_append(P(vbox), P(tabBar))
     gtk_box_append(P(vbox), P(tabView))
-    addTab(to: tabView) // initial tab
+    addTab(to: tabView, command: "tmux new-session -A -s insanitty-ws-\(index)")
     return vbox
 }
 
@@ -121,7 +129,7 @@ func buildWindow() {
     gtk_widget_set_hexpand(P(stack), 1)
     gtk_widget_set_vexpand(P(stack), 1)
     for i in 0..<3 {
-        gtk_stack_add_titled(P(stack), P(makeWorkspacePage()), "ws\(i)", WorkspaceName.generate())
+        gtk_stack_add_titled(P(stack), P(makeWorkspacePage(index: i)), "ws\(i)", WorkspaceName.generate())
     }
 
     let sidebar = OP(gtk_stack_sidebar_new())

@@ -38,10 +38,10 @@ index 8ef7701e2..5c41a5ad3 100644
      // xcframework above, not this one.
 diff --git a/include/insanitty.h b/include/insanitty.h
 new file mode 100644
-index 000000000..b1dba5bfc
+index 000000000..167d8abfc
 --- /dev/null
 +++ b/include/insanitty.h
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,18 @@
 +#pragma once
 +/* insanitty <-> Ghostty GTK embedding C ABI. See src/apprt/gtk/c_api.zig. */
 +#include <gtk/gtk.h>
@@ -51,6 +51,9 @@ index 000000000..b1dba5bfc
 +
 +/* Create a live terminal surface widget (parent into any GtkWidget container). */
 +GtkWidget *insanitty_surface_new(void);
++
++/* Like insanitty_surface_new but runs `cmd` (shell-expanded) — e.g. tmux attach. */
++GtkWidget *insanitty_surface_new_command(const char *cmd);
 +
 +/* Run Ghostty's integrated loop (blocks; required for the terminal to render). */
 +void insanitty_app_run(void);
@@ -92,10 +95,10 @@ index b68be92d0..8342687b4 100644
          step.addCSourceFile(.{
 diff --git a/src/insanitty_c_api.zig b/src/insanitty_c_api.zig
 new file mode 100644
-index 000000000..7457f37cb
+index 000000000..1340aeb79
 --- /dev/null
 +++ b/src/insanitty_c_api.zig
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,60 @@
 +//! Minimal C ABI to embed the Ghostty GTK terminal surface into a host GTK4
 +//! application (insanitty). The host owns its window/chrome; this TU owns the
 +//! libghostty App, the GhosttyApplication singleton, and the integrated run loop.
@@ -135,6 +138,14 @@ index 000000000..7457f37cb
 +/// terminal (pty + renderer) spawns lazily on first realize+resize. Returns GtkWidget*.
 +export fn insanitty_surface_new() ?*anyopaque {
 +    const surface = Surface.new(.none);
++    return @ptrCast(surface.as(gtk.Widget));
++}
++
++/// Like insanitty_surface_new but runs `cmd` (shell-expanded) instead of the default
++/// shell — used for tmux-backed workspaces (`tmux new-session -A -s …`). The command is
++/// cloned by Surface.new, so the caller's buffer need not outlive the call.
++export fn insanitty_surface_new_command(cmd: [*:0]const u8) ?*anyopaque {
++    const surface = Surface.new(.{ .command = .{ .shell = std.mem.span(cmd) } });
 +    return @ptrCast(surface.as(gtk.Widget));
 +}
 +

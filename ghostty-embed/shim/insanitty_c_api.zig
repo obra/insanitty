@@ -40,6 +40,14 @@ export fn insanitty_surface_new() ?*anyopaque {
     return @ptrCast(surface.as(gtk.Widget));
 }
 
+/// Like insanitty_surface_new but runs `cmd` (shell-expanded) instead of the default
+/// shell — used for tmux-backed workspaces (`tmux new-session -A -s …`). The command is
+/// cloned by Surface.new, so the caller's buffer need not outlive the call.
+export fn insanitty_surface_new_command(cmd: [*:0]const u8) ?*anyopaque {
+    const surface = Surface.new(.{ .command = .{ .shell = std.mem.span(cmd) } });
+    return @ptrCast(surface.as(gtk.Widget));
+}
+
 /// Run Ghostty's integrated event loop (pumps core_app.tick so the renderer draws).
 /// Blocks until quit.
 export fn insanitty_app_run() void {

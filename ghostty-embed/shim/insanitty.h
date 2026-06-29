@@ -8,6 +8,9 @@ GApplication *insanitty_app_init(void);
 /* Create a live terminal surface widget (parent into any GtkWidget container). */
 GtkWidget *insanitty_surface_new(void);
 
+/* Like insanitty_surface_new but runs `cmd` (shell-expanded) — e.g. tmux attach. */
+GtkWidget *insanitty_surface_new_command(const char *cmd);
+
 /* Run Ghostty's integrated loop (blocks; required for the terminal to render). */
 void insanitty_app_run(void);
 

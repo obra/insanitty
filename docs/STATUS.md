@@ -22,13 +22,21 @@ Xvfb + matchbox WM + `dbus-run-session`) and **passes**:
 - **Scenario 4** — `Ctrl+T` opened a new **tab** (AdwTabView) with its own live terminal
   (`docs/images/e2e-4-tabs.png`).
 
+**Persistence** (`scripts/e2e-persistence.sh`, PASS) — each workspace's terminal runs
+`tmux new-session -A -s insanitty-ws-N`, so its shell + child processes live in the tmux
+server. The test starts a counter process in a workspace, **kills the app**, confirms the
+counter kept advancing while the app was dead, relaunches, and confirms the workspace
+**re-attached the same live session** (V1=8 < V2=18 < V3=42 across the kill). This is the
+headline "sessions survive restart" feature, robustly verified (a process outlived the app).
+
 Features working (Fantastty's full structure — workspace → tabs → splits → panes):
 workspaces (sidebar + switching), **tabs** (Ctrl+T, AdwTabBar/AdwTabView), **splits**
-(Ctrl+D right / Ctrl+Shift+D down, focus-aware), live terminals with interactive I/O.
-Screenshots in `docs/images/`.
-Not yet: tmux-backed persistence (the headline "survive restart" feature — needs Spike B +
-the tmux control-mode client port), notes/URLs/Linear/sprites/browser, the remote engine
-(Spike C / msquic — needs a build + a LAN host, can't be fully e2e-tested headless here).
+(Ctrl+D right / Ctrl+Shift+D down, focus-aware), **tmux-backed persistent sessions**, live
+terminals with interactive I/O. Screenshots in `docs/images/`.
+Not yet (deferred): the full tmux **control-mode** mapping (tmux windows↔tabs, panes↔splits
+within ONE session per workspace — currently each workspace attaches its own session, splits
+are local panes); notes/URLs/Linear/sprites/browser; the remote engine (Spike C / msquic —
+needs a build + a LAN host, can't be fully e2e-tested headless here).
 
 ## Verified on the dev box (2026-06-29)
 
