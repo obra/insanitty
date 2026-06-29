@@ -15,6 +15,7 @@ GS="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfa
 OUT="${OUT:-docs/images}"
 DISP=":121"
 mkdir -p /tmp/inscfg/ghostty "$OUT"; echo "initial-window = false" > /tmp/inscfg/ghostty/config
+export XDG_STATE_HOME=/tmp/ins-e2e-state; rm -rf "$XDG_STATE_HOME"  # fresh workspace layout each run
 
 cleanup() { kill "${APP_PID:-}" "${WM_PID:-}" "${XVFB_PID:-}" 2>/dev/null; for s in 0 1 2; do tmux kill-session -t "insanitty-ws-$s" 2>/dev/null; done; }
 trap cleanup EXIT

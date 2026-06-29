@@ -56,11 +56,12 @@ The sections below are the unvarnished detail.
 
 ## Persistence & session metadata
 
-Fantastty keeps everything under `~/.fantastty/`. insanitty persists **none** of this.
+Fantastty keeps everything under `~/.fantastty/`. insanitty now persists its **workspace
+layout**; the richer per-workspace metadata is still absent.
 
 | Fantastty (`~/.fantastty/…`) | insanitty | Notes |
 |---|---|---|
-| `layout.json` — workspace/tab arrangement, browser URLs, selected tab | **ABSENT** | |
+| `layout.json` — workspace/tab arrangement, browser URLs, selected tab | **PARTIAL** (`AppLayout`/`LayoutStore`, `Sources/InsanittyCore/AppLayout.swift`) | Persists the workspace list (names/order/indices), each workspace's browser-tab URLs, and the selected workspace to `$XDG_STATE_HOME/insanitty/layout.json`; restored on launch (reattaches tmux by index, recreates browser tabs). Verified `scripts/e2e-layout-persistence.sh`. Not yet: terminal-tab/split layout within a workspace (needs tmux control mode). |
 | `workspaces.json` — per-workspace metadata: name, notes (+revision history), tags, attention flag, `ticketURL`, `pullRequestURL`, `totalActiveSeconds`, archive/trash | **ABSENT** | |
 | `ssh-hosts.json` (note: appears vestigial even in Fantastty) | **ABSENT** | |
 | Idle-aware active-time tracking | **ABSENT** | |

@@ -10,6 +10,7 @@ SHOT="${OUT:-docs/images}/e2e-7-remote-in-gui.png"
 export LD_LIBRARY_PATH="$GS/zig-out/lib" FANTASTTY_REMOTE_ADVERTISE_HOST=127.0.0.1 XDG_RUNTIME_DIR=/tmp/ins-remote-rt
 mkdir -p /tmp/inscfg/ghostty "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 echo "initial-window = false" > /tmp/inscfg/ghostty/config
+export XDG_STATE_HOME=/tmp/ins-rgui-state; rm -rf "$XDG_STATE_HOME"  # fresh workspace layout each run
 tmux kill-session -t insanitty-remote-gui 2>/dev/null
 
 cleanup() { kill "${APP:-}" "${WM:-}" "${XVFB:-}" 2>/dev/null; tmux kill-session -t insanitty-remote-gui 2>/dev/null; "${HELPER:-/tmp/fantastty-helper}" shutdown >/dev/null 2>&1; }

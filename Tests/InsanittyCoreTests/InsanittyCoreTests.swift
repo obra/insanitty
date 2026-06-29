@@ -162,3 +162,37 @@ final class SplitGeometryTests: XCTestCase {
         }
     }
 }
+
+final class AppLayoutTests: XCTestCase {
+    func testRoundTrip() throws {
+        let layout = AppLayout(workspaces: [
+            WorkspaceLayout(index: 0, name: "deep-mesa"),
+            WorkspaceLayout(index: 1, name: "golden-peak", browserURLs: ["https://example.com"]),
+            WorkspaceLayout(index: 5, name: "warm-maple", browserURLs: ["https://a.test", "https://b.test"]),
+        ], selected: 1)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("insanitty-layout-test-\(getpid())-\(layout.workspaces.count).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try LayoutStore.save(layout, to: url)
+        XCTAssertEqual(LayoutStore.load(from: url), layout)
+    }
+
+    func testDefaultURLPrefersXDGStateHome() {
+        let url = LayoutStore.defaultURL(environment: ["XDG_STATE_HOME": "/tmp/xdg-state"], home: "/home/x")
+        XCTAssertEqual(url.path, "/tmp/xdg-state/insanitty/layout.json")
+    }
+
+    func testDefaultURLFallsBackToHome() {
+        let url = LayoutStore.defaultURL(environment: [:], home: "/home/x")
+        XCTAssertEqual(url.path, "/home/x/.local/state/insanitty/layout.json")
+    }
+
+    func testEmptyXDGStateHomeFallsBack() {
+        let url = LayoutStore.defaultURL(environment: ["XDG_STATE_HOME": ""], home: "/home/x")
+        XCTAssertEqual(url.path, "/home/x/.local/state/insanitty/layout.json")
+    }
+
+    func testLoadMissingFileReturnsNil() {
+        XCTAssertNil(LayoutStore.load(from: URL(fileURLWithPath: "/nonexistent/insanitty/layout.json")))
+    }
+}

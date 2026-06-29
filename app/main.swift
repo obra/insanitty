@@ -32,8 +32,10 @@ final class WorkspaceTile {
     let picture: OpaquePointer
     let livePaintable: OpaquePointer
     let name: String
-    init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer, name: String) {
-        self.page = page; self.picture = picture; self.livePaintable = livePaintable; self.name = name
+    let index: Int   // tmux session index, or -1 for the non-persisted "remote (QUIC)" demo
+    init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer, name: String, index: Int) {
+        self.page = page; self.picture = picture; self.livePaintable = livePaintable
+        self.name = name; self.index = index
     }
 }
 nonisolated(unsafe) var tiles: [WorkspaceTile] = []
@@ -129,7 +131,7 @@ func newTabInCurrentWorkspace() { addTab(to: currentTabView()) }
 
 /// Add a workspace page to the stack and a live-thumbnail row to the custom sidebar.
 @discardableResult
-func registerWorkspace(_ page: OpaquePointer, name: String, id: String) -> Int {
+func registerWorkspace(_ page: OpaquePointer, name: String, id: String, index: Int) -> Int {
     guard let stack = mainStack, let list = sidebarList else { return -1 }
     gtk_stack_add_named(P(stack), P(page), id)
 
@@ -156,8 +158,29 @@ func registerWorkspace(_ page: OpaquePointer, name: String, id: String) -> Int {
     gtk_list_box_row_set_child(P(row), P(box))
     gtk_list_box_append(P(list), P(row))
 
-    tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable, name: name))
+    tiles.append(WorkspaceTile(page: page, picture: pic, livePaintable: paintable, name: name, index: index))
     return tiles.count - 1
+}
+
+/// Persist the workspace list (names/indices/order), each workspace's browser-tab URLs, and
+/// the selected workspace to the XDG layout file. The "remote (QUIC)" demo (index -1) is skipped.
+func saveLayout() {
+    var wss: [WorkspaceLayout] = []
+    for tile in tiles where tile.index >= 0 {
+        var urls: [String] = []
+        if let tabView = OP(gtk_widget_get_last_child(P(tile.page))) {
+            for i in 0..<adw_tab_view_get_n_pages(P(tabView)) {
+                guard let page = OP(adw_tab_view_get_nth_page(P(tabView), i)),
+                      let child = OP(adw_tab_page_get_child(P(page))),
+                      let wvRaw = g_object_get_data(P(child), "insanitty-webview"),
+                      let c = webkit_web_view_get_uri(P(OpaquePointer(wvRaw))) else { continue }
+                urls.append(String(cString: c))
+            }
+        }
+        wss.append(WorkspaceLayout(index: tile.index, name: tile.name, browserURLs: urls))
+    }
+    let sel = (currentWorkspace >= 0 && currentWorkspace < tiles.count) ? tiles[currentWorkspace].index : 0
+    try? LayoutStore.save(AppLayout(workspaces: wss, selected: sel), to: LayoutStore.defaultURL())
 }
 
 /// Switch to workspace `idx`: freeze the outgoing thumbnail to a still image and put the
@@ -174,6 +197,7 @@ func selectWorkspace(_ idx: Int) {
     gtk_stack_set_visible_child(P(stack), P(tiles[idx].page))
     gtk_picture_set_paintable(P(tiles[idx].picture), P(tiles[idx].livePaintable))
     currentWorkspace = idx
+    saveLayout()
 }
 
 /// Create a new tmux-backed workspace and switch to it (Ctrl+N).
@@ -181,7 +205,7 @@ func addWorkspace() {
     guard let list = sidebarList, let page = makeWorkspacePage(index: workspaceCounter) else { return }
     let idx = workspaceCounter
     workspaceCounter += 1
-    let tileIdx = registerWorkspace(page, name: WorkspaceName.generate(), id: "ws\(idx)")
+    let tileIdx = registerWorkspace(page, name: WorkspaceName.generate(), id: "ws\(idx)", index: idx)
     gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(tileIdx)))))
 }
 
@@ -277,10 +301,10 @@ let browserUriCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableR
     gtk_editable_set_text(P(OpaquePointer(ud)), u)
 }
 
-/// New WebKitGTK browser tab in the current workspace: a nav bar (back/forward/reload +
-/// address entry) over a real WebKitWebView. Fantastty has browser tabs alongside terminals.
-func newBrowserTabInCurrentWorkspace() {
-    guard let tabView = currentTabView() else { return }
+/// Add a browser tab loading `url` to a workspace's tab view: a nav bar (back/forward/reload +
+/// address entry) over a real WebKitWebView. The container is tagged with its web view so
+/// saveLayout() can read the current URL for persistence.
+func addBrowserTab(to tabView: OpaquePointer, url: String) {
     let web = OP(webkit_web_view_new())!
     gtk_widget_set_hexpand(P(web), 1)
     gtk_widget_set_vexpand(P(web), 1)
@@ -303,17 +327,24 @@ func newBrowserTabInCurrentWorkspace() {
     let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
     gtk_box_append(P(vbox), P(bar))
     gtk_box_append(P(vbox), P(web))
+    g_object_set_data(P(vbox), "insanitty-webview", raw(web))
 
-    let initial = "https://duckduckgo.com"
-    gtk_editable_set_text(P(entry), initial)
-    webkit_web_view_load_uri(P(web), initial)
-    FileHandle.standardError.write(Data("insanitty: browser tab opened (\(initial))\n".utf8))
+    gtk_editable_set_text(P(entry), url)
+    webkit_web_view_load_uri(P(web), url)
 
     let tabPage = OP(adw_tab_view_append(P(tabView), P(vbox)))
     adw_tab_page_set_title(P(tabPage), "Browser")
     adw_tab_view_set_selected_page(P(tabView), P(tabPage))
     g_signal_connect_data(raw(web), "notify::title", unsafeBitCast(browserTitleCb, to: GCallback.self), raw(tabPage), nil, GConnectFlags(rawValue: 0))
     g_signal_connect_data(raw(web), "notify::uri", unsafeBitCast(browserUriCb, to: GCallback.self), raw(entry), nil, GConnectFlags(rawValue: 0))
+}
+
+/// New browser tab in the current workspace (Ctrl+B), then persist the layout.
+func newBrowserTabInCurrentWorkspace() {
+    guard let tabView = currentTabView() else { return }
+    addBrowserTab(to: tabView, url: "https://duckduckgo.com")
+    FileHandle.standardError.write(Data("insanitty: browser tab opened\n".utf8))
+    saveLayout()
 }
 
 /// One workspace page: a tab bar over an AdwTabView of terminal tabs. The first tab is
@@ -398,6 +429,11 @@ let rowSelectedCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutable
 /// Header "Overview" button clicked → toggle the Exposé overview.
 let overviewBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in toggleOverview() }
 
+/// Persist the layout when the window is closing (returns PROPAGATE so the close proceeds).
+let closeRequestCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> gboolean = { _, _ in
+    saveLayout(); return 0
+}
+
 func buildWindow() {
     let win = OP(adw_application_window_new(P(gapp)))
     mainWindow = win
@@ -416,16 +452,32 @@ func buildWindow() {
     gtk_list_box_set_selection_mode(P(list), GTK_SELECTION_SINGLE)
     g_signal_connect_data(raw(list), "row-selected", unsafeBitCast(rowSelectedCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
 
-    for i in 0..<3 {
-        registerWorkspace(makeWorkspacePage(index: i)!, name: WorkspaceName.generate(), id: "ws\(i)")
+    // Restore the persisted workspaces (names, order, browser-tab URLs), reattaching each
+    // tmux session by index; otherwise start with three fresh workspaces.
+    let saved = LayoutStore.load(from: LayoutStore.defaultURL())
+    if let saved = saved, !saved.workspaces.isEmpty {
+        for ws in saved.workspaces {
+            let page = makeWorkspacePage(index: ws.index)!
+            registerWorkspace(page, name: ws.name, id: "ws\(ws.index)", index: ws.index)
+            if let tabView = OP(gtk_widget_get_last_child(P(page))) {
+                for url in ws.browserURLs { addBrowserTab(to: tabView, url: url) }
+            }
+        }
+        workspaceCounter = (saved.workspaces.map { $0.index }.max() ?? 2) + 1
+    } else {
+        for i in 0..<3 {
+            registerWorkspace(makeWorkspacePage(index: i)!, name: WorkspaceName.generate(), id: "ws\(i)", index: i)
+        }
     }
-    registerWorkspace(makeRemoteWorkspacePage()!, name: "remote (QUIC)", id: "remote")
+    // The "remote (QUIC)" demo is always present and never persisted.
+    registerWorkspace(makeRemoteWorkspacePage()!, name: "remote (QUIC)", id: "remote", index: -1)
 
     let sidebarScroll = OP(gtk_scrolled_window_new())
     gtk_scrolled_window_set_policy(P(sidebarScroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC)
     gtk_scrolled_window_set_child(P(sidebarScroll), P(list))
     gtk_widget_set_size_request(P(sidebarScroll), 220, -1)
-    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), 0))))
+    let selPos = tiles.firstIndex(where: { $0.index == (saved?.selected ?? 0) }) ?? 0
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(selPos)))))
 
     let content = OP(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0))
     gtk_box_append(P(content), P(sidebarScroll))
@@ -480,6 +532,7 @@ func buildWindow() {
     gtk_event_controller_set_propagation_phase(P(keyctl), GTK_PHASE_CAPTURE)
     g_signal_connect_data(raw(keyctl), "key-pressed", unsafeBitCast(keyCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
     gtk_widget_add_controller(P(win), P(keyctl))
+    g_signal_connect_data(raw(win), "close-request", unsafeBitCast(closeRequestCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
 
     gtk_window_present(P(win))
 
