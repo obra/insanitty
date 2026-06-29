@@ -18,6 +18,12 @@ final class RemoteQuicFetcher {
     let expectedPin: String
     var attach: [UInt8]
     var attachBuf = QUIC_BUFFER()
+    // Optional input to forward to the remote pane after attach (sendKeys + requestKeyframe).
+    var workspaceID = ""
+    var inputBytes: [UInt8] = []
+    var inputPane = 0
+    private var sendKeysBytes: [UInt8] = []; private var sendKeysBuf = QUIC_BUFFER()
+    private var reqKfBytes: [UInt8] = [];    private var reqKfBuf = QUIC_BUFFER()
     let sem = DispatchSemaphore(value: 0)
     let lock = NSLock()
 
@@ -58,6 +64,9 @@ final class RemoteQuicFetcher {
         _ = api.pointee.ConnectionOpen(reg, remoteConnCb, ctx, &conn)
         _ = host.withCString { hp in api.pointee.ConnectionStart(conn, config, UInt16(0), hp, port) }
         _ = sem.wait(timeout: .now() + 8)
+        // If we forwarded keystrokes, the echoed result comes back as a fresh keyframe after the
+        // remote applies them — let it round-trip and overwrite keyframes[pane] before we close.
+        if !inputBytes.isEmpty { usleep(2_500_000) }
         // ConnectionClose blocks until this connection's callbacks have drained, so no callback
         // fires on this fetcher after it's released. (The registration/api are intentionally left
         // open — a small per-fetch leak; closing the registration deadlocks on its worker threads.)
@@ -72,6 +81,25 @@ final class RemoteQuicFetcher {
         var out = [CChar](repeating: 0, count: 65)
         let got = ins_spki_sha256_hex(der, Int(buf.pointee.Length), &out) == 0 ? String(cString: out) : ""
         return got.lowercased() == expectedPin.lowercased() ? 0 : 1
+    }
+
+    /// After attach, forward any queued keystrokes to the active pane, then ask for a fresh keyframe
+    /// so the echoed result comes back on this same connection. The request buffers are instance
+    /// vars so they outlive the async StreamSend.
+    func sendInputIfNeeded(_ stream: OpaquePointer?) {
+        guard !inputBytes.isEmpty else { return }
+        FileHandle.standardError.write(Data("insanitty: forwarding \(inputBytes.count) input byte(s) to pane \(inputPane)\n".utf8))
+        let b64 = Data(inputBytes).base64EncodedString()
+        sendKeysBytes = Array("{\"type\":\"sendKeys\",\"workspaceID\":\"\(workspaceID)\",\"paneID\":\(inputPane),\"data\":\"\(b64)\"}\n".utf8)
+        reqKfBytes = Array("{\"type\":\"requestKeyframe\",\"workspaceID\":\"\(workspaceID)\",\"paneID\":\(inputPane)}\n".utf8)
+        sendKeysBytes.withUnsafeMutableBufferPointer { bp in
+            sendKeysBuf.Length = UInt32(bp.count); sendKeysBuf.Buffer = bp.baseAddress
+            _ = api.pointee.StreamSend(stream, &sendKeysBuf, 1, QUIC_SEND_FLAG_NONE, nil)
+        }
+        reqKfBytes.withUnsafeMutableBufferPointer { bp in
+            reqKfBuf.Length = UInt32(bp.count); reqKfBuf.Buffer = bp.baseAddress
+            _ = api.pointee.StreamSend(stream, &reqKfBuf, 1, QUIC_SEND_FLAG_NONE, nil)
+        }
     }
 
     func ingest(_ ptr: UnsafePointer<UInt8>, _ len: Int) {
@@ -105,6 +133,7 @@ let remoteConnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?, Unsa
             f.attachBuf.Length = UInt32(bp.count); f.attachBuf.Buffer = bp.baseAddress
             _ = f.api.pointee.StreamSend(stream, &f.attachBuf, 1, QUIC_SEND_FLAG_NONE, nil)
         }
+        f.sendInputIfNeeded(stream)
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
         f.sem.signal()
     default: break

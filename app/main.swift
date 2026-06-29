@@ -19,8 +19,10 @@ nonisolated(unsafe) var mainStack: OpaquePointer?
 nonisolated(unsafe) var remotePaneContainer: OpaquePointer?            // box holding the remote pane tree
 nonisolated(unsafe) var remotePaneSurfaces: [Int: OpaquePointer] = [:] // remote pane id → surface
 nonisolated(unsafe) var pendingFetcher: RemoteQuicFetcher?
+nonisolated(unsafe) var remoteActivePane = 0                           // pane to forward keystrokes to
+nonisolated(unsafe) var pendingRemoteInput: [UInt8] = []              // keystrokes queued for the next fetch
 let remoteLock = NSLock()
-nonisolated(unsafe) var injectTries = 0
+nonisolated(unsafe) var remoteRendered = false   // true once the remote workspace has painted once
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
 nonisolated(unsafe) var surfaces = Set<OpaquePointer>()
@@ -370,9 +372,21 @@ func makeWorkspacePage(index: Int) -> OpaquePointer? {
 
 /// An inert surface for a remote pane: rendered only by injected output (no shell of its own).
 /// Ref-sunk so it survives re-parenting when the remote layout is (re)built.
+/// Queue a keystroke for the remote pane; the next injectRemoteGrid fetch forwards it (sendKeys)
+/// and asks for a fresh keyframe so the echoed result paints back.
+let remoteKeyCb: @convention(c) (OpaquePointer?, guint, guint, GdkModifierType, UnsafeMutableRawPointer?) -> gboolean = { _, keyval, _, state, _ in
+    guard let bytes = encodeTmuxKey(keyval: keyval, state: state) else { return 0 }
+    remoteLock.lock(); pendingRemoteInput.append(contentsOf: bytes); remoteLock.unlock()
+    return 1
+}
+
 func makeRemotePaneSurface() -> OpaquePointer? {
     guard let s = makeSilentTerminal() else { return nil }
     g_object_ref_sink(raw(s))
+    let kc = OP(gtk_event_controller_key_new())
+    gtk_event_controller_set_propagation_phase(P(kc), GTK_PHASE_CAPTURE)
+    g_signal_connect_data(raw(kc), "key-pressed", unsafeBitCast(remoteKeyCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_widget_add_controller(P(s), P(kc))
     return s
 }
 
@@ -619,6 +633,9 @@ func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data?
 /// panes onto GtkPaned splits, painting each keyframe via inject_output. No subprocess for QUIC.
 func injectRemoteGrid() {
     guard remotePaneContainer != nil else { return }
+    // Steady state: once painted, only fetch again when there are queued keystrokes to forward.
+    remoteLock.lock(); let hasInput = !pendingRemoteInput.isEmpty; remoteLock.unlock()
+    if remoteRendered && !hasInput { return }
     // Test hook: render a jsonl fixture of remote messages instead of connecting, to exercise the
     // multi-pane mapping (the live multi-pane path needs the helper's --tmux-session, unavailable here).
     if let fixture = ProcessInfo.processInfo.environment["INSANITTY_REMOTE_FIXTURE"] {
@@ -643,6 +660,12 @@ func injectRemoteGrid() {
             FileHandle.standardError.write(Data("insanitty: remote bootstrap failed\n".utf8)); return
         }
         let fetcher = RemoteQuicFetcher(bootstrap: boot)
+        remoteLock.lock(); let input = pendingRemoteInput; pendingRemoteInput = []; remoteLock.unlock()
+        if !input.isEmpty {
+            fetcher.workspaceID = "insanitty-remote-gui"
+            fetcher.inputBytes = input
+            fetcher.inputPane = remoteActivePane
+        }
         guard fetcher.fetch(host: boot.host, port: boot.port), !fetcher.keyframes.isEmpty else {
             FileHandle.standardError.write(Data("insanitty: native QUIC fetch failed\n".utf8)); return
         }
@@ -654,7 +677,7 @@ func injectRemoteGrid() {
 /// Main-thread tail of injectRemoteGrid: lay out the remote panes and paint each keyframe.
 let remoteRenderIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
     remoteLock.lock(); let fetcher = pendingFetcher; pendingFetcher = nil; remoteLock.unlock()
-    if let fetcher = fetcher { renderRemoteWorkspace(fetcher) }
+    if let fetcher = fetcher { renderRemoteWorkspace(fetcher); remoteRendered = true }
     return 0 // G_SOURCE_REMOVE
 }
 
@@ -686,7 +709,14 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
             insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, ansi.count)
         }
     }
+    remoteActivePane = fetcher.snapshot?.panes.first(where: { $0.isActive })?.paneID
+        ?? fetcher.keyframes.keys.sorted().first ?? 0
     FileHandle.standardError.write(Data("insanitty: rendered \(fetcher.keyframes.count)-pane remote workspace (native QUIC)\n".utf8))
+    if let kf = fetcher.keyframes[remoteActivePane] {
+        let content = kf.rows.map { $0.cells.map { $0.text }.joined() }.joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces).prefix(200)
+        FileHandle.standardError.write(Data("insanitty: remote pane \(remoteActivePane) content: \(content)\n".utf8))
+    }
 }
 
 /// Sidebar row selected → switch to that workspace.
@@ -813,14 +843,14 @@ func buildWindow() {
 
     gtk_window_present(P(win))
 
-    // Once the remote surface has realized, fetch its grid from the helper (QUIC) + inject.
-    // Re-inject a few times (the surface realizes slightly after the window maps).
+    // Poll the remote helper: fetch + render until the workspace has painted once (the surface
+    // realizes slightly after the window maps), then idle until keystrokes are queued — each fetch
+    // forwards queued input and repaints the echoed result. injectRemoteGrid early-returns when
+    // rendered with nothing pending, so the steady-state poll is just a flag check.
     let injectCb: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
-        injectRemoteGrid()
-        injectTries += 1
-        return injectTries < 6 ? 1 : 0 // re-fetch ~6x, 3s apart (picks up remote layout changes)
+        injectRemoteGrid(); return 1
     }
-    g_timeout_add(3000, injectCb, nil)
+    g_timeout_add(1500, injectCb, nil)
 }
 
 setvbuf(stdout, nil, Int32(_IONBF), 0)
