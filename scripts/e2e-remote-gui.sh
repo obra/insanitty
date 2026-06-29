@@ -19,7 +19,11 @@ Xvfb :122 -screen 0 1100x720x24 >/tmp/xvfb-rgui.log 2>&1 & XVFB=$!; sleep 2
 DISPLAY=:122 matchbox-window-manager >/tmp/wm-rgui.log 2>&1 & WM=$!; sleep 1
 DISPLAY=:122 XDG_CONFIG_HOME=/tmp/inscfg GHOSTTY_RESOURCES_DIR="$GS/zig-out/share/ghostty" \
   dbus-run-session -- ./build/insanitty >/tmp/app-rgui.log 2>&1 & APP=$!
-sleep 13
+sleep 5
+# Switch to the "remote (QUIC)" workspace (4th sidebar row) so its surface realizes; the
+# re-inject timer (fires at present+6s/+9s) then paints the fetched grid where we can see it.
+DISPLAY=:122 xdotool mousemove 110 190 click 1
+sleep 8
 DISPLAY=:122 import -window root "$SHOT" 2>/dev/null
 grep -q 'injected .* bytes of remote grid' /tmp/app-rgui.log || { echo "REMOTE-GUI E2E FAIL: app did not inject a fetched grid"; exit 1; }
 echo "REMOTE-GUI E2E PASS: insanitty fetched a grid over QUIC and rendered it ($SHOT)"

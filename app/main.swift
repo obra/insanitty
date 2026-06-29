@@ -17,6 +17,8 @@ nonisolated(unsafe) var gapp: OpaquePointer?
 nonisolated(unsafe) var mainWindow: OpaquePointer?
 nonisolated(unsafe) var mainStack: OpaquePointer?
 nonisolated(unsafe) var remoteSurface: OpaquePointer?
+nonisolated(unsafe) var pendingGrid: Data?
+let gridLock = NSLock()
 nonisolated(unsafe) var injectTries = 0
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 // Track the live terminal surfaces we create so we can find the focused one for splitting.
@@ -167,28 +169,42 @@ func makeRemoteWorkspacePage() -> OpaquePointer? {
     return vbox
 }
 
-/// Fetch the remote pane grid from the helper (over QUIC) and inject it into the surface.
+/// Fetch the remote pane grid from the helper (over QUIC) on a background thread, then paint it
+/// into the surface on the GTK main thread (`g_idle_add`). Fetching off the main loop keeps the
+/// UI responsive while the helper completes its QUIC handshake — a synchronous fetch here would
+/// freeze input handling for the duration.
 func injectRemoteGrid() {
-    guard let surface = remoteSurface else { return }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/bin/bash")
-    p.arguments = ["scripts/remote-grid-ansi.sh", "insanitty-remote-gui"]
-    let pipe = Pipe()
-    p.standardOutput = pipe
-    p.standardError = FileHandle.nullDevice
-    do {
-        try p.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        if !data.isEmpty {
-            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-                insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, data.count)
-            }
+    guard remoteSurface != nil else { return }
+    Thread.detachNewThread {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["scripts/remote-grid-ansi.sh", "insanitty-remote-gui"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            guard !data.isEmpty else { return }
+            gridLock.lock(); pendingGrid = data; gridLock.unlock()
+            g_idle_add(injectGridIdle, nil)
+            FileHandle.standardError.write(Data("insanitty: injected \(data.count) bytes of remote grid\n".utf8))
+        } catch {
+            FileHandle.standardError.write(Data("insanitty: remote fetch failed: \(error)\n".utf8))
         }
-        FileHandle.standardError.write(Data("insanitty: injected \(data.count) bytes of remote grid\n".utf8))
-    } catch {
-        FileHandle.standardError.write(Data("insanitty: remote fetch failed: \(error)\n".utf8))
     }
+}
+
+/// Main-thread tail of injectRemoteGrid: paint the fetched grid into the remote surface.
+let injectGridIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
+    gridLock.lock(); let data = pendingGrid; pendingGrid = nil; gridLock.unlock()
+    if let data = data, let surface = remoteSurface {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, data.count)
+        }
+    }
+    return 0 // G_SOURCE_REMOVE
 }
 
 func buildWindow() {
@@ -206,8 +222,6 @@ func buildWindow() {
         gtk_stack_add_titled(P(stack), P(makeWorkspacePage(index: i)), "ws\(i)", WorkspaceName.generate())
     }
     gtk_stack_add_titled(P(stack), P(makeRemoteWorkspacePage()), "remote", "remote (QUIC)")
-    // Show the remote workspace first so its surface realizes before we inject its grid.
-    gtk_stack_set_visible_child_name(P(stack), "remote")
 
     let sidebar = OP(gtk_stack_sidebar_new())
     gtk_stack_sidebar_set_stack(P(sidebar), P(stack))
@@ -265,6 +279,9 @@ func buildWindow() {
 }
 
 setvbuf(stdout, nil, Int32(_IONBF), 0)
+// insanitty supplies its own window. Ghostty's embedding lib (artifact == .lib) already gates
+// off its own default window (see the `embedded` check in the GTK Application), so there's
+// nothing to configure here.
 guard let a = insanitty_app_init() else {
     FileHandle.standardError.write(Data("insanitty: app_init failed\n".utf8)); exit(1)
 }
