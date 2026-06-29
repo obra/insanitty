@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 # Swift toolchain (swiftly-managed); override SWIFTC if installed elsewhere.
 SWIFTC="${SWIFTC:-$(ls -d "$HOME"/.local/share/swiftly/toolchains/*/usr/bin/swiftc 2>/dev/null | head -1)}"
-GHOSTTY="${GHOSTTY:-/tmp/claude-1000/-home-jesse-git-insanitty/d4fe9727-abcd-4a64-bfab-456b14fdb334/scratchpad/ghostty-src}"
+GHOSTTY="${GHOSTTY:-$PWD/vendor/ghostty}"   # where scripts/build-ghostty.sh puts the lib
 LIBDIR="$GHOSTTY/zig-out/lib"
 INCDIR="$GHOSTTY/zig-out/include"
 RPATH="${RPATH:-$LIBDIR}"   # packaging overrides this to the install lib dir
