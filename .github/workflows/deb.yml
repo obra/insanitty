@@ -92,6 +92,7 @@ jobs:
           ./scripts/e2e-settings.sh
           ./scripts/e2e-notes.sh
           ./scripts/e2e-archive.sh
+          ./scripts/e2e-archive-restore.sh
           ./scripts/e2e-osc.sh
           ./scripts/e2e-layout-restore.sh
           ./scripts/e2e-attach.sh

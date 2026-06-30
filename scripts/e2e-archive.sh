@@ -20,7 +20,7 @@ DISPLAY="$DISP" XDG_CONFIG_HOME=/tmp/inscfg GHOSTTY_RESOURCES_DIR="$GS/zig-out/s
   dbus-run-session -- ./build/insanitty >/tmp/app-ar.log 2>&1 & APP=$!
 sleep 5
 DISPLAY="$DISP" xdotool mousemove 110 270 click 3; sleep 1   # right-click workspace ws-1
-DISPLAY="$DISP" xdotool mousemove 109 307 click 1; sleep 2   # "Archive"
+DISPLAY="$DISP" xdotool mousemove 109 340 click 1; sleep 2   # "Archive" (2nd item, under "Rename…")
 DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null
 
 if grep -q '"insanitty-ws-1"' "$WS" 2>/dev/null && python3 -c "import json,sys; d={m['workspaceID']:m for m in json.load(open('$WS'))}; sys.exit(0 if d.get('insanitty-ws-1',{}).get('isArchived') else 1)"; then

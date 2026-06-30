@@ -434,6 +434,7 @@ func archiveWorkspace(tmuxIndex: Int, trash: Bool) {
     let tile = tiles[arrayIdx]
     let id = "insanitty-ws-\(tmuxIndex)"
     var m = metaFor(id)
+    m.name = tile.name   // remember the name so the restore picker can show + restore it
     if trash { m.setTrashed(true, at: Date()) } else { m.setArchived(true, at: Date()) }
     workspaceMeta[id] = m; saveWorkspaceMeta()
 
@@ -447,6 +448,26 @@ func archiveWorkspace(tmuxIndex: Int, trash: Bool) {
         let sel = min(arrayIdx, tiles.count - 1)
         gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(sel)))))
     }
+    saveLayout()
+}
+
+/// Restore an archived/trashed workspace by its metadata id (`insanitty-ws-<n>`): clear the flags,
+/// re-create its tmux-backed page (a fresh session via `new-session -A`; the live terminal state from
+/// before archiving was closed, but the name, notes, ticket/PR and attention flag come back), add it
+/// to the sidebar, and select it. No-op if it's already active.
+func restoreWorkspace(id: String) {
+    guard let list = sidebarList,
+          let n = Int(id.replacingOccurrences(of: "insanitty-ws-", with: "")),
+          !tiles.contains(where: { $0.index == n }) else { return }
+    var m = metaFor(id)
+    m.setArchived(false, at: Date()); m.setTrashed(false, at: Date())
+    workspaceMeta[id] = m; saveWorkspaceMeta()
+    let name = m.name.isEmpty ? WorkspaceName.generate() : m.name
+    guard let page = makeWorkspacePage(index: n) else { return }
+    workspaceCounter = max(workspaceCounter, n + 1)
+    let tileIdx = registerWorkspace(page, name: name, id: "ws\(n)", index: n)
+    setTileAttention(tileIdx, m.needsAttention)
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(tileIdx)))))
     saveLayout()
 }
 
@@ -1153,6 +1174,65 @@ func openSprites() {
 
 let spritesBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openSprites() }
 
+nonisolated(unsafe) var archivedWindow: OpaquePointer?
+nonisolated(unsafe) var archivedList: OpaquePointer?
+nonisolated(unsafe) var archivedIds: [String] = []   // row index → workspace id
+
+/// Rebuild the archived/trashed list. Each row restores its workspace on activation.
+func refreshArchivedList() {
+    guard let list = archivedList else { return }
+    while let old = OP(gtk_widget_get_first_child(P(list))) { gtk_list_box_remove(P(list), P(old)) }
+    let entries = workspaceMeta.values.filter { $0.isArchived || $0.isTrashed }
+        .sorted { $0.modifiedAt > $1.modifiedAt }
+    archivedIds = entries.map { $0.workspaceID }
+    if entries.isEmpty {
+        let row = OP(adw_action_row_new()); adw_preferences_row_set_title(P(row), "No archived or trashed workspaces")
+        gtk_list_box_append(P(list), P(row)); return
+    }
+    for m in entries {
+        let row = OP(adw_action_row_new())!
+        adw_preferences_row_set_title(P(row), m.name.isEmpty ? m.workspaceID : m.name)
+        adw_action_row_set_subtitle(P(row), m.isTrashed ? "Trashed — click to restore" : "Archived — click to restore")
+        gtk_list_box_append(P(list), P(row))
+    }
+}
+
+/// Open the archived/trashed workspaces picker — the restore view for soft-deleted workspaces.
+func openArchived() {
+    let win = OP(adw_window_new())!
+    archivedWindow = win
+    gtk_window_set_title(P(win), "Archived workspaces")
+    if let mw = mainWindow { gtk_window_set_transient_for(P(win), P(mw)); gtk_window_set_modal(P(win), 1) }
+    gtk_window_set_default_size(P(win), 440, 460)
+    let toolbar = OP(adw_toolbar_view_new())
+    adw_toolbar_view_add_top_bar(P(toolbar), P(OP(adw_header_bar_new())))
+    let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8))!
+    for set in [gtk_widget_set_margin_top, gtk_widget_set_margin_bottom, gtk_widget_set_margin_start, gtk_widget_set_margin_end] { set(P(vbox), 8) }
+    let scroll = OP(gtk_scrolled_window_new())
+    gtk_widget_set_vexpand(P(scroll), 1)
+    let list = OP(gtk_list_box_new())!
+    gtk_list_box_set_selection_mode(P(list), GTK_SELECTION_NONE)
+    gtk_widget_add_css_class(P(list), "boxed-list")
+    archivedList = list
+    g_signal_connect_data(raw(list), "row-activated", unsafeBitCast(archivedRowCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_scrolled_window_set_child(P(scroll), P(list))
+    gtk_box_append(P(vbox), P(scroll))
+    adw_toolbar_view_set_content(P(toolbar), P(vbox))
+    adw_window_set_content(P(win), P(toolbar))
+    refreshArchivedList()
+    gtk_window_present(P(win))
+}
+
+let archivedRowCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, rowPtr, _ in
+    guard let row = rowPtr else { return }
+    let idx = Int(gtk_list_box_row_get_index(P(row)))
+    guard idx >= 0, idx < archivedIds.count else { return }
+    restoreWorkspace(id: archivedIds[idx])
+    refreshArchivedList()
+}
+
+let archivedBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openArchived() }
+
 /// Launch the remote helper and read its bootstrap line. The helper prints the `FANTASTTY_REMOTE …`
 /// line then double-forks a daemon and exits immediately — so fast that Foundation's Process exit
 /// monitor can miss the exit and `waitUntilExit()` hangs forever. We don't need the exit status (the
@@ -1645,6 +1725,12 @@ func buildWindow() {
         renameWorkspace(tmuxIndex: idx, to: String(spec[spec.index(after: eq)...]))
     }
 
+    // Test hook: restore an archived/trashed workspace on startup (what the Archived picker does),
+    // e.g. INSANITTY_RESTORE=insanitty-ws-5 — drives restoreWorkspace without automating the picker.
+    if let id = ProcessInfo.processInfo.environment["INSANITTY_RESTORE"], !id.isEmpty {
+        restoreWorkspace(id: id)
+    }
+
     // Test hook: attach a session on startup (what the attach picker does), e.g.
     // INSANITTY_ATTACH=name or INSANITTY_ATTACH=user@host:port/name — avoids clicking near live sessions.
     if let spec = ProcessInfo.processInfo.environment["INSANITTY_ATTACH"], !spec.isEmpty {
@@ -1685,6 +1771,10 @@ func buildWindow() {
     gtk_widget_set_tooltip_text(P(spritesBtn), "Sprites (Fly.io)")
     g_signal_connect_data(raw(spritesBtn), "clicked", unsafeBitCast(spritesBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
     adw_header_bar_pack_start(P(header), P(spritesBtn))
+    let archivedBtn = OP(gtk_button_new_from_icon_name("user-trash-symbolic"))!
+    gtk_widget_set_tooltip_text(P(archivedBtn), "Archived & trashed workspaces (restore)")
+    g_signal_connect_data(raw(archivedBtn), "clicked", unsafeBitCast(archivedBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_header_bar_pack_start(P(header), P(archivedBtn))
     let settingsBtn = OP(gtk_button_new_from_icon_name("emblem-system-symbolic"))!
     gtk_widget_set_tooltip_text(P(settingsBtn), "Settings")
     g_signal_connect_data(raw(settingsBtn), "clicked", unsafeBitCast(settingsBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
