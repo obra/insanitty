@@ -41,7 +41,7 @@ Name:           $PKG
 Version:        $RPMVER
 Release:        1%{?dist}
 Summary:        Terminal workspace manager (native Linux port of Fantastty)
-License:        Proprietary
+License:        MIT
 BuildArch:      $ARCH
 # System libraries insanitty links against (Fedora names; rename for other distros).
 Requires:       gtk4, libadwaita, webkitgtk6.0, openssl-libs, tmux
