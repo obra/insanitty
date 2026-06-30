@@ -96,6 +96,7 @@ jobs:
           ./scripts/e2e-layout-restore.sh
           ./scripts/e2e-attach.sh
           ./scripts/e2e-keybindings.sh
+          ./scripts/e2e-rename.sh
           ./scripts/e2e-remote-multipane.sh
           ./scripts/e2e-remote-gui.sh
           ./scripts/e2e-remote-live.sh

@@ -135,7 +135,7 @@ final class WorkspaceTile {
     let page: OpaquePointer
     let picture: OpaquePointer
     let livePaintable: OpaquePointer
-    let name: String
+    var name: String
     let index: Int   // tmux session index, or -1 for the non-persisted "remote (QUIC)" demo
     let label: OpaquePointer   // the sidebar name label (updated to show the attention marker)
     init(page: OpaquePointer, picture: OpaquePointer, livePaintable: OpaquePointer, name: String, index: Int, label: OpaquePointer) {
@@ -148,6 +148,17 @@ final class WorkspaceTile {
 func setTileAttention(_ tileIdx: Int, _ on: Bool) {
     guard tileIdx >= 0, tileIdx < tiles.count else { return }
     gtk_label_set_text(P(tiles[tileIdx].label), (on ? "\u{26A0} " : "") + tiles[tileIdx].name)
+}
+
+/// Rename the workspace with the given tmux index, updating its sidebar label (keeping any ⚠ marker)
+/// and persisting the new name to layout.json so it survives restart. Blank names are ignored.
+func renameWorkspace(tmuxIndex: Int, to newName: String) {
+    let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, let i = tiles.firstIndex(where: { $0.index == tmuxIndex }) else { return }
+    tiles[i].name = trimmed
+    let flagged = workspaceMeta["insanitty-ws-\(tmuxIndex)"]?.needsAttention == true
+    gtk_label_set_text(P(tiles[i].label), (flagged ? "\u{26A0} " : "") + trimmed)
+    saveLayout()
 }
 
 nonisolated(unsafe) var tiles: [WorkspaceTile] = []
@@ -455,13 +466,48 @@ let popClosedCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Vo
     if raw(contextPopover) == raw(pop) { contextPopover = nil }
 }
 
+nonisolated(unsafe) var renameEntry: OpaquePointer?
+nonisolated(unsafe) var renameTmuxIndex = -1
+
+/// Pop a small dialog to rename the workspace; commit on the "rename" response.
+func openRenameDialog(tmuxIndex: Int) {
+    guard let tile = tiles.first(where: { $0.index == tmuxIndex }) else { return }
+    renameTmuxIndex = tmuxIndex
+    let dialog = OP(adw_message_dialog_new(nil, "Rename workspace", nil))!
+    if let mw = mainWindow { gtk_window_set_transient_for(P(dialog), P(mw)); gtk_window_set_modal(P(dialog), 1) }
+    adw_message_dialog_add_response(P(dialog), "cancel", "Cancel")
+    adw_message_dialog_add_response(P(dialog), "rename", "Rename")
+    adw_message_dialog_set_response_appearance(P(dialog), "rename", ADW_RESPONSE_SUGGESTED)
+    adw_message_dialog_set_default_response(P(dialog), "rename")
+    let entry = OP(gtk_entry_new())!
+    gtk_editable_set_text(P(entry), tile.name)
+    adw_message_dialog_set_extra_child(P(dialog), P(entry))
+    renameEntry = entry
+    g_signal_connect_data(raw(dialog), "response", unsafeBitCast(renameResponseCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_window_present(P(dialog))
+}
+
+let renameResponseCb: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { _, resp, _ in
+    if let resp = resp, String(cString: resp) == "rename", let e = renameEntry,
+       let text = gtk_editable_get_text(P(e)) {
+        renameWorkspace(tmuxIndex: renameTmuxIndex, to: String(cString: text))
+    }
+    renameEntry = nil
+}
+
+let renameClickCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in
+    let idx = contextMenuTmuxIndex
+    if let p = contextPopover { gtk_popover_popdown(P(p)) }
+    openRenameDialog(tmuxIndex: idx)
+}
+
 /// Right-click a sidebar row → a popover with Archive / Move to Trash for that workspace.
 let rowRightClickCb: @convention(c) (OpaquePointer?, Int32, Double, Double, UnsafeMutableRawPointer?) -> Void = { gesture, _, x, y, ud in
     contextMenuTmuxIndex = Int(bitPattern: ud)
     guard let widget = OP(gtk_event_controller_get_widget(P(gesture))) else { return }
     let pop = OP(gtk_popover_new())!
     let vbox = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2))!
-    for (label, cb) in [("Archive", archiveClickCb), ("Move to Trash", trashClickCb)] {
+    for (label, cb) in [("Rename…", renameClickCb), ("Archive", archiveClickCb), ("Move to Trash", trashClickCb)] {
         let btn = OP(gtk_button_new_with_label(label))!
         gtk_button_set_has_frame(P(btn), 0)
         gtk_widget_set_halign(P(btn), GTK_ALIGN_FILL)
@@ -1591,6 +1637,13 @@ func buildWindow() {
         selPos = remoteRow
     }
     gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(selPos)))))
+
+    // Test hook: rename a workspace on startup (what the Rename… dialog does), e.g.
+    // INSANITTY_RENAME=0=My Project — drives renameWorkspace without automating a dialog.
+    if let spec = ProcessInfo.processInfo.environment["INSANITTY_RENAME"],
+       let eq = spec.firstIndex(of: "="), let idx = Int(spec[..<eq]) {
+        renameWorkspace(tmuxIndex: idx, to: String(spec[spec.index(after: eq)...]))
+    }
 
     // Test hook: attach a session on startup (what the attach picker does), e.g.
     // INSANITTY_ATTACH=name or INSANITTY_ATTACH=user@host:port/name — avoids clicking near live sessions.
