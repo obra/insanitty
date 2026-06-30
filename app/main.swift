@@ -1637,6 +1637,59 @@ let linearKeyApplyCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) 
 nonisolated(unsafe) var notesList: OpaquePointer?
 nonisolated(unsafe) var notesEntry: OpaquePointer?
 nonisolated(unsafe) var notesWorkspaceID = ""
+nonisolated(unsafe) var noteEditEntry: OpaquePointer?
+nonisolated(unsafe) var noteEditIndex = -1
+
+/// Open a dialog to edit note `index`; on save, `updateContent` pushes the old text onto the note's
+/// revision history (visible in the expander) and persists.
+func openNoteEdit(index: Int) {
+    let notes = workspaceMeta[notesWorkspaceID]?.notes ?? []
+    guard index >= 0, index < notes.count else { return }
+    noteEditIndex = index
+    let dialog = OP(adw_message_dialog_new(nil, "Edit note", nil))!
+    if let mw = mainWindow { gtk_window_set_transient_for(P(dialog), P(mw)); gtk_window_set_modal(P(dialog), 1) }
+    adw_message_dialog_add_response(P(dialog), "cancel", "Cancel")
+    adw_message_dialog_add_response(P(dialog), "save", "Save")
+    adw_message_dialog_set_response_appearance(P(dialog), "save", ADW_RESPONSE_SUGGESTED)
+    adw_message_dialog_set_default_response(P(dialog), "save")
+    let entry = OP(gtk_entry_new())!
+    gtk_editable_set_text(P(entry), notes[index].content)
+    adw_message_dialog_set_extra_child(P(dialog), P(entry))
+    noteEditEntry = entry
+    g_signal_connect_data(raw(dialog), "response", unsafeBitCast(noteEditResponseCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_window_present(P(dialog))
+}
+
+/// Replace note `index`'s content, pushing the old text onto its revision history, and persist.
+func editNote(workspaceID: String, index: Int, to newText: String) {
+    let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+    var m = metaFor(workspaceID)
+    guard index >= 0, index < m.notes.count, !trimmed.isEmpty else { return }
+    m.notes[index].updateContent(trimmed, at: Date())
+    workspaceMeta[workspaceID] = m; saveWorkspaceMeta()
+    if workspaceID == notesWorkspaceID { rebuildNotesList() }
+}
+
+let noteEditResponseCb: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { _, resp, _ in
+    if let resp = resp, String(cString: resp) == "save", let e = noteEditEntry, let text = gtk_editable_get_text(P(e)) {
+        editNote(workspaceID: notesWorkspaceID, index: noteEditIndex, to: String(cString: text))
+    }
+    noteEditEntry = nil
+}
+
+/// Edit button on a note row → open its edit dialog. user_data carries (note index + 1).
+let noteEditBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, ud in
+    openNoteEdit(index: Int(bitPattern: ud) - 1)
+}
+
+func makeNoteEditButton(_ index: Int) -> OpaquePointer? {
+    let btn = OP(gtk_button_new_from_icon_name("document-edit-symbolic"))!
+    gtk_widget_set_valign(P(btn), GTK_ALIGN_CENTER)
+    gtk_widget_set_tooltip_text(P(btn), "Edit note")
+    g_signal_connect_data(raw(btn), "clicked", unsafeBitCast(noteEditBtnCb, to: GCallback.self),
+                          UnsafeMutableRawPointer(bitPattern: index + 1), nil, GConnectFlags(rawValue: 0))
+    return btn
+}
 
 /// A note's timestamp as a short local date+time.
 func noteTimeLabel(_ date: Date) -> String {
@@ -1672,13 +1725,27 @@ func rebuildNotesList() {
         }
         return
     }
-    for note in notes {
-        let row = OP(adw_action_row_new())
-        adw_preferences_row_set_title(P(row), note.content)
-        var subtitle = noteTimeLabel(note.timestamp)
-        if !note.revisions.isEmpty { subtitle += "  · edited \(note.revisions.count)×" }
-        adw_action_row_set_subtitle(P(row), subtitle)
-        gtk_list_box_append(P(list), P(row))
+    for (i, note) in notes.enumerated() {
+        if note.revisions.isEmpty {
+            let row = OP(adw_action_row_new())
+            adw_preferences_row_set_title(P(row), note.content)
+            adw_action_row_set_subtitle(P(row), noteTimeLabel(note.timestamp))
+            if let btn = makeNoteEditButton(i) { adw_action_row_add_suffix(P(row), P(btn)) }
+            gtk_list_box_append(P(list), P(row))
+        } else {
+            // Edited note → an expander revealing each prior revision (newest first).
+            let exp = OP(adw_expander_row_new())!
+            adw_preferences_row_set_title(P(exp), note.content)
+            adw_expander_row_set_subtitle(P(exp), noteTimeLabel(note.timestamp) + "  · edited \(note.revisions.count)× — expand for history")
+            if let btn = makeNoteEditButton(i) { adw_expander_row_add_action(P(exp), P(btn)) }
+            for rev in note.revisions.reversed() {
+                let child = OP(adw_action_row_new())
+                adw_preferences_row_set_title(P(child), rev.content)
+                adw_action_row_set_subtitle(P(child), "was — " + noteTimeLabel(rev.timestamp))
+                adw_expander_row_add_row(P(exp), P(child))
+            }
+            gtk_list_box_append(P(list), P(exp))
+        }
     }
 }
 
@@ -1816,6 +1883,13 @@ func buildWindow() {
     // e.g. INSANITTY_RESTORE=insanitty-ws-5 — drives restoreWorkspace without automating the picker.
     if let id = ProcessInfo.processInfo.environment["INSANITTY_RESTORE"], !id.isEmpty {
         restoreWorkspace(id: id)
+    }
+
+    // Test hook: edit a note on startup (what the note Edit dialog does), creating a revision, e.g.
+    // INSANITTY_EDIT_NOTE=insanitty-ws-0:0:new text.
+    if let spec = ProcessInfo.processInfo.environment["INSANITTY_EDIT_NOTE"] {
+        let parts = spec.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        if parts.count == 3, let idx = Int(parts[1]) { editNote(workspaceID: parts[0], index: idx, to: parts[2]) }
     }
 
     // Test hook: attach a session on startup (what the attach picker does), e.g.
