@@ -66,9 +66,10 @@ final class RemoteQuicFetcher {
         api = sharedApi
         var config: OpaquePointer?
         let alpn = Array("fantastty-remote-engine-v1".utf8)
+        var settings = ins_settings_datagram_recv()   // negotiate datagrams → the helper streams paneDelta datagrams
         alpn.withUnsafeBufferPointer { ap in
             var alpnBuf = QUIC_BUFFER(Length: UInt32(ap.count), Buffer: UnsafeMutablePointer(mutating: ap.baseAddress))
-            _ = api.pointee.ConfigurationOpen(reg, &alpnBuf, 1, nil, 0, nil, &config)
+            _ = api.pointee.ConfigurationOpen(reg, &alpnBuf, 1, &settings, UInt32(MemoryLayout<QUIC_SETTINGS>.size), nil, &config)
         }
         var cred = QUIC_CREDENTIAL_CONFIG()
         cred.Type = QUIC_CREDENTIAL_TYPE_NONE
@@ -110,9 +111,14 @@ final class RemoteQuicFetcher {
         return snapshot != nil || !keyframes.isEmpty
     }
 
-    /// Reuse the held-open connection: forward any queued input, then request a fresh keyframe for
-    /// the active pane and let it round-trip. Because the connection stays attached, the helper keeps
-    /// observing the tmux session, so this reflects external output too. Blocking; run off-main.
+    private var idleTicks = 0
+
+    /// Reuse the held-open connection. With queued input, forward the keys and request a fresh
+    /// keyframe so the echoed output is captured reliably. When idle, periodically request a keyframe:
+    /// the helper streams live paneDeltas as the panes change (applied for low-latency updates), but
+    /// each delta is encoded against the last keyframe, so without advancing that base the deltas grow
+    /// without bound and the reliable stream falls behind. A periodic keyframe both advances the base
+    /// (keeping deltas small) and guarantees the current full state eventually lands. Blocking; off-main.
     func repoll() {
         guard heldConn != nil else { return }
         if let active = snapshot?.panes.first(where: { $0.isActive })?.paneID ?? keyframes.keys.sorted().first {
@@ -121,9 +127,16 @@ final class RemoteQuicFetcher {
         if !inputBytes.isEmpty {
             sendInputIfNeeded(stream)
             usleep(1_500_000)
+            requestFreshKeyframe()
+            usleep(1_500_000)
+            idleTicks = 0
+            return
         }
-        requestFreshKeyframe()
-        usleep(1_500_000)
+        idleTicks += 1
+        if idleTicks % 3 == 0 {   // ~every 4.5s at the 1.5s poll cadence
+            requestFreshKeyframe()
+            usleep(1_500_000)
+        }
     }
 
     /// Close the held-open connection (app shutdown).
@@ -164,20 +177,67 @@ final class RemoteQuicFetcher {
         }
     }
 
-    func ingest(_ ptr: UnsafePointer<UInt8>, _ len: Int) {
+    /// Called on the main thread after a datagram delta is applied (host renders).
+    var onDatagramApplied: (() -> Void)?
+
+    /// A thread-safe copy of the current keyframes (datagrams mutate them off the main thread).
+    func latestKeyframes() -> [Int: PaneKeyframe] {
         lock.lock(); defer { lock.unlock() }
+        return keyframes
+    }
+
+    /// Ingest a single QUIC datagram: a `paneDelta` (apply onto the pane's keyframe) or, defensively,
+    /// a `paneKeyframe` (replace). Datagrams are whole messages (not newline-framed like the stream).
+    func ingestDatagram(_ ptr: UnsafePointer<UInt8>, _ len: Int) {
+        let line = String(decoding: UnsafeBufferPointer(start: ptr, count: len), as: UTF8.self)
+        guard let msg = try? RemoteGridProtocol.decode(line: line) else { return }
+        lock.lock()
+        var applied = false
+        switch msg {
+        case .paneDelta(let delta):
+            if let kf = keyframes[delta.paneID] {
+                keyframes[delta.paneID] = RemoteGridDelta.apply(delta, to: kf)
+                applied = true
+            }
+        case .paneKeyframe(let kf): keyframes[kf.paneID] = kf; applied = true
+        default: break
+        }
+        lock.unlock()
+        if applied {
+            FileHandle.standardError.write(Data("insanitty: applied remote datagram (\(len) bytes)\n".utf8))
+        }
+        onDatagramApplied?()
+    }
+
+    /// Decode complete newline-framed messages off the reliable stream and fold them into the pane
+    /// keyframes: snapshots set the layout, keyframes replace a pane, and paneDeltas (which the helper
+    /// sends here, not as datagrams, whenever a delta exceeds the QUIC datagram size limit — i.e. for
+    /// any real-sized grid) are applied onto the pane. Each line is consumed exactly once: deltas are
+    /// cumulative, so reprocessing would double-apply them. Renders are triggered after applying.
+    func ingest(_ ptr: UnsafePointer<UInt8>, _ len: Int) {
+        lock.lock()
         received.append(ptr, count: len)
-        let text = String(decoding: received, as: UTF8.self)
-        guard let lastNL = text.lastIndex(of: "\n") else { return }
-        for line in text[..<lastNL].split(separator: "\n").map(String.init) {
-            guard let msg = try? RemoteGridProtocol.decode(line: line) else { continue }
+        var applied = false
+        while let nl = received.firstIndex(of: 0x0A) {
+            let lineData = received.subdata(in: received.startIndex..<nl)
+            received.removeSubrange(received.startIndex...nl)
+            guard let line = String(data: lineData, encoding: .utf8),
+                  let msg = try? RemoteGridProtocol.decode(line: line) else { continue }
             switch msg {
             case .workspaceSnapshot(let s): snapshot = s; expectedPanes = Set(s.panes.map { $0.paneID })
-            case .paneKeyframe(let kf): keyframes[kf.paneID] = kf
+            case .paneKeyframe(let kf): keyframes[kf.paneID] = kf; applied = true
+            case .paneDelta(let delta):
+                if let kf = keyframes[delta.paneID] {
+                    keyframes[delta.paneID] = RemoteGridDelta.apply(delta, to: kf)
+                    applied = true
+                    FileHandle.standardError.write(Data("insanitty: applied remote delta (\(lineData.count) bytes, stream)\n".utf8))
+                }
             default: break
             }
         }
         if let exp = expectedPanes, !exp.isEmpty, exp.isSubset(of: Set(keyframes.keys)) { sem.signal() }
+        lock.unlock()
+        if applied { onDatagramApplied?() }
     }
 }
 
@@ -197,6 +257,10 @@ let remoteConnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?, Unsa
             _ = f.api.pointee.StreamSend(stream, &f.attachBuf, 1, QUIC_SEND_FLAG_NONE, nil)
         }
         f.sendInputIfNeeded(stream)
+    case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
+        if let buf = ins_datagram_buffer(ev), let p = buf.pointee.Buffer {
+            f.ingestDatagram(p, Int(buf.pointee.Length))
+        }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
         f.sem.signal()
     default: break

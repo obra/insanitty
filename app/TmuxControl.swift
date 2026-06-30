@@ -46,7 +46,9 @@ final class TmuxControlClient {
         var cargv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
         cargv.append(nil)
         defer { for p in cargv where p != nil { free(p) } }
+        spawnLock.lock()
         masterFD = cargv.withUnsafeMutableBufferPointer { ins_pty_spawn($0.baseAddress, &pid) }
+        spawnLock.unlock()
         guard masterFD >= 0 else {
             FileHandle.standardError.write(Data("tmux-cc: spawn failed for \(session)\n".utf8)); return false
         }

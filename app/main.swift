@@ -25,9 +25,22 @@ nonisolated(unsafe) var pendingFetcher: RemoteQuicFetcher?
 nonisolated(unsafe) var remoteActivePane = 0                           // pane to forward keystrokes to
 nonisolated(unsafe) var pendingRemoteInput: [UInt8] = []              // keystrokes queued for the next fetch
 let remoteLock = NSLock()
+// Serializes the actual fork/exec of child processes. forkpty (tmux -CC panes) and Foundation's
+// Process both fork(); two threads forking concurrently can leave a child holding the other's pipe
+// fds (so a reader never sees EOF) or race the SIGCHLD reaper. Held only around the spawn, never a
+// blocking read, so it can't deadlock.
+let spawnLock = NSLock()
 nonisolated(unsafe) var remoteRendered = false   // true once the remote workspace has painted once
 nonisolated(unsafe) var remoteFetchInFlight = false           // a poll's fetch is running
 nonisolated(unsafe) var remoteSession: RemoteQuicFetcher?     // the held-open connection (reused each poll)
+nonisolated(unsafe) var remoteDatagramRenderQueued = false   // coalesce datagram-triggered renders
+
+/// Main-thread render triggered by an applied datagram delta (coalesced).
+let remoteDatagramRenderIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { _ in
+    remoteLock.lock(); remoteDatagramRenderQueued = false; let s = remoteSession; remoteLock.unlock()
+    if let s = s { renderRemoteWorkspace(s) }
+    return 0
+}
 nonisolated(unsafe) var lastRemoteTreeSig = ""               // layout signature; rebuild the tree only on change
 nonisolated(unsafe) var lastRemoteAnsi: [Int: String] = [:]  // per-pane painted ANSI; re-inject only on change
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
@@ -1066,6 +1079,35 @@ func openSprites() {
 
 let spritesBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in openSprites() }
 
+/// Launch the remote helper and read its bootstrap line. The helper prints the `FANTASTTY_REMOTE …`
+/// line then double-forks a daemon and exits immediately — so fast that Foundation's Process exit
+/// monitor can miss the exit and `waitUntilExit()` hangs forever. We don't need the exit status (the
+/// daemon outlives us by design), so we read stdout until the bootstrap line appears and return,
+/// leaving the short-lived launcher to be reaped by the runloop. Returns the matching line or nil.
+func launchHelperBootstrap(_ path: String, _ args: [String]) -> String? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let outPipe = Pipe(); p.standardOutput = outPipe; p.standardError = FileHandle.nullDevice
+    spawnLock.lock()
+    do { try p.run() } catch { spawnLock.unlock(); return nil }
+    spawnLock.unlock()
+    let reader = outPipe.fileHandleForReading
+    var buf = Data()
+    while true {
+        let chunk = reader.availableData   // blocks until data or EOF (empty)
+        if chunk.isEmpty { break }         // EOF: launcher closed stdout
+        buf.append(chunk)
+        if let text = String(data: buf, encoding: .utf8),
+           let line = text.split(separator: "\n", omittingEmptySubsequences: false)
+               .map(String.init).first(where: { $0.hasPrefix("FANTASTTY_REMOTE ") }) {
+            return line
+        }
+    }
+    return String(decoding: buf, as: UTF8.self).split(separator: "\n")
+        .map(String.init).first(where: { $0.hasPrefix("FANTASTTY_REMOTE ") })
+}
+
 /// Run a process (optionally feeding stdin) and return its stdout, or nil on failure.
 func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data? {
     let p = Process()
@@ -1073,7 +1115,9 @@ func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data?
     p.arguments = args
     let outPipe = Pipe(); p.standardOutput = outPipe; p.standardError = FileHandle.nullDevice
     let inPipe = Pipe(); if stdin != nil { p.standardInput = inPipe }
-    do { try p.run() } catch { return nil }
+    spawnLock.lock()
+    do { try p.run() } catch { spawnLock.unlock(); return nil }
+    spawnLock.unlock()
     if let stdin = stdin {
         inPipe.fileHandleForWriting.write(Data(stdin.utf8))
         inPipe.fileHandleForWriting.closeFile()
@@ -1131,9 +1175,7 @@ func injectRemoteGrid() {
         if let tmux = ProcessInfo.processInfo.environment["INSANITTY_REMOTE_TMUX"], !tmux.isEmpty {
             launchArgs += ["--tmux-session", tmux]
         }
-        guard let bootData = runProcess(helper, launchArgs),
-              let line = String(decoding: bootData, as: UTF8.self).split(separator: "\n")
-                .map(String.init).first(where: { $0.hasPrefix("FANTASTTY_REMOTE ") }),
+        guard let line = launchHelperBootstrap(helper, launchArgs),
               let boot = try? RemoteBootstrapLine.parse(line) else {
             FileHandle.standardError.write(Data("insanitty: remote bootstrap failed\n".utf8)); return
         }
@@ -1141,9 +1183,18 @@ func injectRemoteGrid() {
         remoteLock.lock(); let input = pendingRemoteInput; pendingRemoteInput = []; remoteLock.unlock()
         fetcher.inputBytes = input   // workspaceID + inputPane are set inside fetch()
         guard fetcher.fetch(host: boot.host, port: boot.port, hold: true), !fetcher.keyframes.isEmpty else {
+            FileHandle.standardError.write(Data("insanitty: remote fetch produced no keyframes (host \(boot.host):\(boot.port))\n".utf8))
             fetcher.closeHeld(); return
         }
         fetcher.inputBytes = []
+        // Stream applied datagram deltas to the renderer (coalesced) — autonomous background output.
+        fetcher.onDatagramApplied = {
+            remoteLock.lock()
+            let queue = !remoteDatagramRenderQueued
+            if queue { remoteDatagramRenderQueued = true }
+            remoteLock.unlock()
+            if queue { g_idle_add(remoteDatagramRenderIdle, nil) }
+        }
         remoteSession = fetcher
         remoteLock.lock(); pendingFetcher = fetcher; remoteLock.unlock()
         g_idle_add(remoteRenderIdle, nil)
@@ -1161,18 +1212,19 @@ let remoteRenderIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { 
 /// surfaces, then inject each pane's keyframe (rendered to ANSI).
 func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
     guard let container = remotePaneContainer else { return }
+    let keyframes = fetcher.latestKeyframes()   // thread-safe snapshot (datagrams mutate off-main)
     let windows = fetcher.snapshot?.windows ?? []
     let layout = (windows.first(where: { $0.isActive }) ?? windows.first)?.layout
     let tree: TmuxLayoutNode
     if let layout = layout, let parsed = TmuxLayoutParser.parse(layout) {
         tree = parsed
-    } else if let pane = fetcher.keyframes.keys.sorted().first {
+    } else if let pane = keyframes.keys.sorted().first {
         tree = .leaf(pane: pane)   // no usable layout → a single pane
     } else { return }
 
     // Rebuild the GtkPaned tree only when the layout / pane-set changes — otherwise the surfaces
     // stay put across polls (no flicker). A relayout forces a repaint of every pane.
-    let sig = (layout ?? "leaf") + "|" + fetcher.keyframes.keys.sorted().map(String.init).joined(separator: ",")
+    let sig = (layout ?? "leaf") + "|" + keyframes.keys.sorted().map(String.init).joined(separator: ",")
     if sig != lastRemoteTreeSig {
         for (_, s) in remotePaneSurfaces where gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
         while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
@@ -1183,15 +1235,15 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
         if let widget = widget { gtk_box_append(P(container), P(widget)) }
         lastRemoteTreeSig = sig
         lastRemoteAnsi = [:]
-        FileHandle.standardError.write(Data("insanitty: rendered \(fetcher.keyframes.count)-pane remote workspace (native QUIC)\n".utf8))
+        FileHandle.standardError.write(Data("insanitty: rendered \(keyframes.count)-pane remote workspace (native QUIC)\n".utf8))
     }
 
     remoteActivePane = fetcher.snapshot?.panes.first(where: { $0.isActive })?.paneID
-        ?? fetcher.keyframes.keys.sorted().first ?? 0
+        ?? keyframes.keys.sorted().first ?? 0
 
     // Paint only the panes whose content changed since the last poll. Skipping unchanged panes
     // avoids flicker AND lets a predictive-echo paint survive until the real keyframe differs.
-    for (pane, kf) in fetcher.keyframes {
+    for (pane, kf) in keyframes {
         guard let surface = remotePaneSurfaces[pane] else { continue }
         let ansiStr = RemoteGridRenderer.ansi(for: kf)
         if lastRemoteAnsi[pane] == ansiStr { continue }
@@ -1202,7 +1254,7 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
         }
         if pane == remoteActivePane {
             let content = kf.rows.map { $0.cells.map { $0.text }.joined() }.joined(separator: " ")
-                .trimmingCharacters(in: .whitespaces).prefix(200)
+                .trimmingCharacters(in: .whitespaces).prefix(4000)
             FileHandle.standardError.write(Data("insanitty: remote pane \(pane) content: \(content)\n".utf8))
         }
     }
@@ -1498,6 +1550,12 @@ func buildWindow() {
     // When the tmux -CC demo is enabled, open on it so it realizes immediately.
     if ProcessInfo.processInfo.environment["INSANITTY_TMUX_CC"] != nil, let last = tiles.indices.last {
         selPos = last
+    }
+    // Test hook: open directly on the remote (QUIC) workspace, instead of a fragile pixel click on
+    // its sidebar row (the row index shifts with the number of local workspaces).
+    if ProcessInfo.processInfo.environment["INSANITTY_SELECT_REMOTE"] != nil,
+       let remoteRow = tiles.firstIndex(where: { $0.index == -1 }) {
+        selPos = remoteRow
     }
     gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(selPos)))))
 

@@ -57,6 +57,29 @@ public struct PaneKeyframe: Decodable, Sendable {
     public let cursor: CursorState
     public let activeScreen: ActiveScreen
     public let datagramsEnabledAfterKeyframe: Bool
+
+    public init(workspaceID: String, paneID: Int, paneGeneration: UInt64, keyframeID: UInt64,
+                gridSize: GridSize, rows: [GridRow], cursor: CursorState, activeScreen: ActiveScreen,
+                datagramsEnabledAfterKeyframe: Bool) {
+        self.workspaceID = workspaceID; self.paneID = paneID; self.paneGeneration = paneGeneration
+        self.keyframeID = keyframeID; self.gridSize = gridSize; self.rows = rows; self.cursor = cursor
+        self.activeScreen = activeScreen; self.datagramsEnabledAfterKeyframe = datagramsEnabledAfterKeyframe
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try c.decode(String.self, forKey: .workspaceID)
+        paneID = try c.decode(Int.self, forKey: .paneID)
+        paneGeneration = try c.decode(UInt64.self, forKey: .paneGeneration)
+        keyframeID = try c.decode(UInt64.self, forKey: .keyframeID)
+        gridSize = try c.decode(GridSize.self, forKey: .gridSize)
+        rows = try c.decode([GridRow].self, forKey: .rows)
+        cursor = try c.decode(CursorState.self, forKey: .cursor)
+        activeScreen = try c.decode(ActiveScreen.self, forKey: .activeScreen)
+        datagramsEnabledAfterKeyframe = try c.decodeIfPresent(Bool.self, forKey: .datagramsEnabledAfterKeyframe) ?? false
+    }
+    enum CodingKeys: String, CodingKey {
+        case workspaceID, paneID, paneGeneration, keyframeID, gridSize, rows, cursor, activeScreen, datagramsEnabledAfterKeyframe
+    }
 }
 
 public struct PaneDelta: Decodable, Sendable {
@@ -65,7 +88,22 @@ public struct PaneDelta: Decodable, Sendable {
     public let paneGeneration: UInt64
     public let baseKeyframeID: UInt64
     public let deltaSequence: UInt64
+    public let rowUpdates: [RowUpdate]
     public let cursor: CursorState?
+
+    enum CodingKeys: String, CodingKey {
+        case workspaceID, paneID, paneGeneration, baseKeyframeID, deltaSequence, rowUpdates, cursor
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try c.decode(String.self, forKey: .workspaceID)
+        paneID = try c.decode(Int.self, forKey: .paneID)
+        paneGeneration = try c.decodeIfPresent(UInt64.self, forKey: .paneGeneration) ?? 0
+        baseKeyframeID = try c.decodeIfPresent(UInt64.self, forKey: .baseKeyframeID) ?? 0
+        deltaSequence = try c.decodeIfPresent(UInt64.self, forKey: .deltaSequence) ?? 0
+        rowUpdates = try c.decodeIfPresent([RowUpdate].self, forKey: .rowUpdates) ?? []
+        cursor = try c.decodeIfPresent(CursorState.self, forKey: .cursor)
+    }
 }
 
 public struct UnsupportedPaneState: Decodable, Sendable {
@@ -82,6 +120,10 @@ public struct GridRow: Decodable, Sendable {
     public let index: Int
     public let rowVersion: UInt64
     public let cells: [GridCell]
+
+    public init(index: Int, rowVersion: UInt64, cells: [GridCell]) {
+        self.index = index; self.rowVersion = rowVersion; self.cells = cells
+    }
 
     enum CodingKeys: String, CodingKey { case index, rowVersion, cells, text }
     public init(from decoder: Decoder) throws {

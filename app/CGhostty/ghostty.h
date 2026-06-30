@@ -25,13 +25,19 @@ static inline gulong ins_signal_connect(void *instance, const char *signal,
 
 /* Spawn argv inside a fresh pseudo-terminal and return the master fd (or -1), writing the child
  * pid to *out_pid. forkpty() opens the pty in the parent, then in the child sets up the slave as
- * the controlling tty; the child then only execvp()s, so this is safe to call from a threaded
- * process. Used for `tmux -CC`, which requires a real tty (it refuses pipes). */
+ * the controlling tty; the child closes every inherited fd above stdio and execvp()s, so this is
+ * safe to call from a threaded process. Used for `tmux -CC`, which requires a real tty (it refuses
+ * pipes). Closing the inherited fds is essential: otherwise the long-lived tmux client holds open a
+ * copy of any pipe another thread had open at fork time (e.g. a Foundation subprocess's stdout pipe),
+ * so that pipe never reaches EOF and the reader hangs forever. */
 static inline int ins_pty_spawn(char *const argv[], pid_t *out_pid) {
     int master = -1;
     pid_t pid = forkpty(&master, NULL, NULL, NULL);
     if (pid < 0) return -1;
     if (pid == 0) {
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0) maxfd = 1024;
+        for (int fd = 3; fd < maxfd; fd++) close(fd);
         execvp(argv[0], argv);
         _exit(127); /* exec failed */
     }

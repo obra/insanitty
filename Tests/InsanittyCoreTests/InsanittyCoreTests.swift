@@ -485,3 +485,36 @@ final class LinearTests: XCTestCase {
         XCTAssertNil(LinearTokenStore.load(from: url))
     }
 }
+
+final class RemoteGridDeltaTests: XCTestCase {
+    private func rowText(_ kf: PaneKeyframe, _ index: Int) -> String? {
+        kf.rows.first { $0.index == index }?.cells.map { $0.text }.joined()
+    }
+    private func keyframe(_ rows: String) -> PaneKeyframe {
+        // rows is "text" for row 0 (compact text encoding)
+        let line = #"{"paneKeyframe":{"_0":{"workspaceID":"w","paneID":1,"paneGeneration":1,"keyframeID":1,"gridSize":{"columns":10,"rows":3},"rows":[{"index":0,"rowVersion":1,"text":"__ROW__"}],"cursor":{"row":0,"column":0,"visible":true,"shape":"block","cursorVersion":1},"activeScreen":"primary","datagramsEnabledAfterKeyframe":true}}}"#.replacingOccurrences(of: "__ROW__", with: rows)
+        guard case .paneKeyframe(let kf) = try! RemoteGridProtocol.decode(line: line) else { fatalError() }
+        return kf
+    }
+    private func delta(_ inner: String) -> PaneDelta {
+        guard case .paneDelta(let d) = try! RemoteGridProtocol.decode(line: #"{"paneDelta":{"_0":"# + inner + "}}") else { fatalError() }
+        return d
+    }
+
+    func testFullRowText() {
+        let kf = keyframe("old")
+        let d = delta(#"{"workspaceID":"w","paneID":1,"paneGeneration":1,"baseKeyframeID":1,"deltaSequence":1,"rowUpdates":[{"rowIndex":0,"rowVersion":2,"update":{"fullRowText":{"_0":"HELLO"}}},{"rowIndex":1,"rowVersion":1,"update":{"fullRowText":{"_0":"WORLD"}}}],"cursor":{"row":1,"column":5,"visible":true,"shape":"block","cursorVersion":2}}"#)
+        let out = RemoteGridDelta.apply(d, to: kf)
+        XCTAssertEqual(rowText(out, 0), "HELLO")
+        XCTAssertEqual(rowText(out, 1), "WORLD")
+        XCTAssertEqual(out.cursor.column, 5)   // cursor from the delta
+    }
+
+    func testSpanSplice() {
+        let kf = keyframe("old")
+        // Replace from column 2: existing "old" → "ol" + "XY" → "olXY"
+        let d = delta(#"{"workspaceID":"w","paneID":1,"paneGeneration":1,"baseKeyframeID":1,"deltaSequence":2,"rowUpdates":[{"rowIndex":0,"rowVersion":3,"update":{"span":{"baseRowVersion":1,"startColumn":2,"cells":[{"text":"X","width":1,"style":{"foreground":{"default":{}},"background":{"default":{}},"underlineColor":{"default":{}},"bold":false,"faint":false,"italic":false,"blink":false,"inverse":false,"invisible":false,"strikethrough":false,"underline":"none"}},{"text":"Y","width":1,"style":{"foreground":{"default":{}},"background":{"default":{}},"underlineColor":{"default":{}},"bold":false,"faint":false,"italic":false,"blink":false,"inverse":false,"invisible":false,"strikethrough":false,"underline":"none"}}]}}}]}"#)
+        let out = RemoteGridDelta.apply(d, to: kf)
+        XCTAssertEqual(rowText(out, 0), "olXY")
+    }
+}
