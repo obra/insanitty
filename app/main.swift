@@ -342,6 +342,45 @@ func clearAllAttention() {
     saveWorkspaceMeta()
 }
 
+/// Reorder the sidebar: move the workspace at array position `from` to position `to`, keeping the
+/// GtkListBox rows and the `tiles` array in lockstep, and persist the new order to layout.json.
+func moveWorkspace(from: Int, to: Int) {
+    guard let list = sidebarList, from != to,
+          from >= 0, from < tiles.count, to >= 0, to < tiles.count,
+          let row = OP(gtk_list_box_get_row_at_index(P(list), Int32(from))) else { return }
+    g_object_ref(raw(row))
+    gtk_list_box_remove(P(list), P(row))
+    gtk_list_box_insert(P(list), P(row), Int32(to))
+    g_object_unref(raw(row))
+    let tile = tiles.remove(at: from); tiles.insert(tile, at: to)
+    if let sel = OP(gtk_list_box_get_selected_row(P(list))) {
+        currentWorkspace = Int(gtk_list_box_row_get_index(P(sel)))
+    }
+    saveLayout()
+}
+
+/// G_TYPE_INT — GLib fundamental type ids are `id << G_TYPE_FUNDAMENTAL_SHIFT` (shift = 2), and the
+/// int fundamental id is 6. Stable ABI; the macro itself isn't importable from C.
+let gTypeInt: GType = 6 << 2
+nonisolated(unsafe) var dragSourceRowIndex = -1   // array position of the row being dragged
+
+/// Provide the dragged row's current position as the DnD payload.
+let rowDragPrepareCb: @convention(c) (OpaquePointer?, Double, Double, UnsafeMutableRawPointer?) -> UnsafeMutablePointer<GdkContentProvider>? = { src, _, _, _ in
+    guard let widget = OP(gtk_event_controller_get_widget(P(src))) else { return nil }
+    dragSourceRowIndex = Int(gtk_list_box_row_get_index(P(widget)))
+    var val = GValue(); g_value_init(&val, gTypeInt); g_value_set_int(&val, Int32(dragSourceRowIndex))
+    return gdk_content_provider_new_for_value(&val)
+}
+
+/// Drop onto a row → move the dragged row to this row's position.
+let rowDropCb: @convention(c) (OpaquePointer?, OpaquePointer?, Double, Double, UnsafeMutableRawPointer?) -> gboolean = { target, _, _, _, _ in
+    guard let widget = OP(gtk_event_controller_get_widget(P(target))) else { return 0 }
+    let to = Int(gtk_list_box_row_get_index(P(widget)))
+    if dragSourceRowIndex >= 0 { moveWorkspace(from: dragSourceRowIndex, to: to) }
+    dragSourceRowIndex = -1
+    return 1
+}
+
 /// Add a workspace page to the stack and a live-thumbnail row to the custom sidebar.
 @discardableResult
 func registerWorkspace(_ page: OpaquePointer, name: String, id: String, index: Int) -> Int {
@@ -370,6 +409,15 @@ func registerWorkspace(_ page: OpaquePointer, name: String, id: String, index: I
     let row = OP(gtk_list_box_row_new())!
     gtk_list_box_row_set_child(P(row), P(box))
     gtk_list_box_append(P(list), P(row))
+
+    // Drag a row onto another to reorder the sidebar.
+    let drag = OP(gtk_drag_source_new())!
+    gtk_drag_source_set_actions(P(drag), GDK_ACTION_MOVE)
+    g_signal_connect_data(raw(drag), "prepare", unsafeBitCast(rowDragPrepareCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_widget_add_controller(P(row), P(drag))
+    let drop = OP(gtk_drop_target_new(gTypeInt, GDK_ACTION_MOVE))!
+    g_signal_connect_data(raw(drop), "drop", unsafeBitCast(rowDropCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    gtk_widget_add_controller(P(row), P(drop))
 
     // Right-click → archive/trash this workspace. Persisted workspaces only (not the remote demo).
     if index >= 0 {
@@ -1890,6 +1938,12 @@ func buildWindow() {
     if let spec = ProcessInfo.processInfo.environment["INSANITTY_EDIT_NOTE"] {
         let parts = spec.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
         if parts.count == 3, let idx = Int(parts[1]) { editNote(workspaceID: parts[0], index: idx, to: parts[2]) }
+    }
+
+    // Test hook: reorder workspaces on startup (what a sidebar drag does), e.g. INSANITTY_MOVE_WS=2:0.
+    if let spec = ProcessInfo.processInfo.environment["INSANITTY_MOVE_WS"] {
+        let parts = spec.split(separator: ":").map(String.init)
+        if parts.count == 2, let from = Int(parts[0]), let to = Int(parts[1]) { moveWorkspace(from: from, to: to) }
     }
 
     // Test hook: attach a session on startup (what the attach picker does), e.g.
