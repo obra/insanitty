@@ -8,42 +8,24 @@
 # Env: GHOSTTY (ghostty checkout with zig-out), HELPER (fantastty-helper), VERSION, ARCH.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. scripts/lib-package.sh
 
 VERSION="${VERSION:-0.1.0~dev}"
 ARCH="${ARCH:-$(dpkg --print-architecture 2>/dev/null || echo amd64)}"
-GHOSTTY="${GHOSTTY:-$PWD/vendor/ghostty}"   # scripts/build-ghostty.sh builds the lib here
-ZLIB="$GHOSTTY/zig-out/lib"; ZSHARE="$GHOSTTY/zig-out/share/ghostty"
-MQ="${MSQUIC:-$PWD/vendor/msquic}"   # scripts/build-msquic.sh builds it here
-MQLIB="$MQ/build/bin/Release"
-HELPER="${HELPER:-build/fantastty-helper}"; [ -x "$HELPER" ] || HELPER=/tmp/fantastty-helper
+pkg_resolve_inputs
 
 PKG=insanitty
 ROOT="build/deb/${PKG}_${VERSION}_${ARCH}"
 say() { printf '\n== %s ==\n' "$*"; }
 
-[ -f "$ZLIB/libghostty-gtk.so" ] || { echo "missing libghostty-gtk.so ($ZLIB) — run scripts/build-ghostty.sh + the insanitty-lib build"; exit 1; }
-[ -f "$MQLIB/libmsquic.so" ] || { echo "missing libmsquic.so ($MQLIB) — build msquic (set MSQUIC)"; exit 1; }
+pkg_check_inputs
 
 say "1/4 Build the app with install rpath (/usr/lib/$PKG)"
 RPATH="/usr/lib/$PKG" MQRPATH="/usr/lib/$PKG" ./scripts/build-app.sh
 
 say "2/4 Stage the package tree"
 rm -rf "$ROOT"
-install -Dm755 build/insanitty                "$ROOT/usr/lib/$PKG/insanitty-bin"
-# Engine lib (+ versioned soname links)
-for f in "$ZLIB"/libghostty-gtk.so*; do install -Dm644 "$f" "$ROOT/usr/lib/$PKG/$(basename "$f")"; done
-# msquic (in-process QUIC for the remote workspace) — the app's rpath finds it at /usr/lib/$PKG
-for f in "$MQLIB"/libmsquic.so*; do [ -e "$f" ] && install -Dm644 "$f" "$ROOT/usr/lib/$PKG/$(basename "$f")"; done
-# Ghostty resources (terminfo, themes, etc.)
-mkdir -p "$ROOT/usr/share/$PKG"; cp -r "$ZSHARE" "$ROOT/usr/share/$PKG/ghostty"
-# Remote-engine helper + its VT lib (best-effort; remote needs these at runtime)
-if [ -x "$HELPER" ]; then
-  install -Dm755 "$HELPER" "$ROOT/usr/libexec/$PKG/fantastty-helper"
-  for f in "$ZLIB"/libghostty-vt.so*; do [ -e "$f" ] && install -Dm644 "$f" "$ROOT/usr/libexec/$PKG/$(basename "$f")"; done
-fi
-# Shell integration + desktop entry
-install -Dm644 scripts/shell-integration/insanitty.sh "$ROOT/usr/share/$PKG/shell-integration/insanitty.sh"
-install -Dm644 packaging/insanitty.desktop           "$ROOT/usr/share/applications/insanitty.desktop"
+stage_payload "$ROOT/usr/bin" "$ROOT/usr/lib/$PKG" "$ROOT/usr/share" "$ROOT/usr/libexec" "$PKG"
 
 # Launcher wrapper: point Ghostty at its bundled resources, then exec the real binary.
 install -Dm755 /dev/stdin "$ROOT/usr/bin/insanitty" <<EOF

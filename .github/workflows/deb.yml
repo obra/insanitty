@@ -68,15 +68,21 @@ jobs:
           sudo apt-get install -y cmake ninja-build
           MSQUIC_SRC="$RUNNER_TEMP/msquic" ./scripts/build-msquic.sh
 
-      - name: Build app + .deb
+      - name: Build packages (.deb, .tar.gz, .rpm)
         run: |
+          sudo apt-get install -y rpm
           export GHOSTTY="$RUNNER_TEMP/ghostty" MSQUIC="$RUNNER_TEMP/msquic"
           ./scripts/build-deb.sh
+          ./scripts/build-tarball.sh
+          ./scripts/build-rpm.sh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: insanitty-deb
-          path: dist/*.deb
+          name: insanitty-packages
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+            dist/*.rpm
 
       # Drive the REAL app through its UI headless (Xvfb + matchbox + dbus, software GL).
       # Provisional (continue-on-error) until the software-GL/WM/dbus path is confirmed on a
