@@ -54,6 +54,7 @@ let remoteDatagramRenderIdle: @convention(c) (UnsafeMutableRawPointer?) -> gbool
     return 0
 }
 nonisolated(unsafe) var lastRemoteAnsi: [Int: String] = [:]  // per-pane painted ANSI; re-inject only on change
+nonisolated(unsafe) var lastRemoteScreen: [Int: ActiveScreen] = [:]  // per-pane primary/alternate, switched on change
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 nonisolated(unsafe) var settingsURL = SettingsStore.defaultURL()
 nonisolated(unsafe) var currentSettings = SettingsStore.load(from: SettingsStore.defaultURL())
@@ -1480,6 +1481,17 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
         if let u = unsupportedPanes[pane], u.fallback != "keepLastGoodKeyframe" {
             ansiStr = RemoteGridRenderer.unsupportedBanner(reason: u.reason, fallback: u.fallback)
         } else if let kf = keyframes[pane] {
+            // Enter/leave ghostty's alternate-screen buffer to match the remote pane, so primary-screen
+            // scrollback isn't polluted by a full-screen app (vim/less) and is restored when it exits.
+            if lastRemoteScreen[pane] != kf.activeScreen {
+                let sw = kf.activeScreen == .alternate ? "\u{1b}[?1049h" : "\u{1b}[?1049l"
+                Data(sw.utf8).withUnsafeBytes { raw in
+                    insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, sw.utf8.count)
+                }
+                lastRemoteScreen[pane] = kf.activeScreen
+                lastRemoteAnsi[pane] = nil   // force a full repaint into the switched buffer
+                vlog("insanitty: remote pane \(pane) screen → \(kf.activeScreen)\n")
+            }
             ansiStr = RemoteGridRenderer.ansi(for: kf)
         } else {
             continue
