@@ -20,7 +20,25 @@ public enum RemoteGridRenderer {
         }
         out += "\u{1b}[\(keyframe.cursor.row + 1);\(keyframe.cursor.column + 1)H"  // cursor
         out += keyframe.cursor.visible ? "\u{1b}[?25h" : "\u{1b}[?25l"
+        out += decscusr(for: keyframe.cursor.shape)  // cursor shape (block/bar/underline)
         return out
+    }
+
+    /// A clear-screen banner shown when the helper reports a pane it can't render
+    /// (`unsupportedPaneState`) with a blank/diagnostic fallback — so the user sees *why* a pane is
+    /// blank instead of an empty rectangle. Reason/fallback come straight from the helper.
+    public static func unsupportedBanner(reason: String, fallback: String) -> String {
+        "\u{1b}[2J\u{1b}[H\u{1b}[0m\u{1b}[33m⚠ remote pane unavailable\u{1b}[0m\r\n"
+            + "  reason: \(reason)\r\n  fallback: \(fallback)\r\n"
+    }
+
+    /// DECSCUSR (`ESC[ <n> SP q`) for the cursor shape — steady block/underline/bar.
+    static func decscusr(for shape: CursorShape) -> String {
+        switch shape {
+        case .block: return "\u{1b}[2 q"
+        case .underline: return "\u{1b}[4 q"
+        case .bar: return "\u{1b}[6 q"
+        }
     }
 
     /// The SGR (`ESC[…m`) sequence for a cell style — a reset followed by the active attributes.

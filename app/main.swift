@@ -1251,17 +1251,26 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
         ?? keyframes.keys.sorted().first ?? 0
 
     // Paint only the panes whose content changed since the last poll. Skipping unchanged panes
-    // avoids flicker AND lets a predictive-echo paint survive until the real keyframe differs.
-    for (pane, kf) in keyframes {
-        guard let surface = remotePaneSurfaces[pane] else { continue }
-        let ansiStr = RemoteGridRenderer.ansi(for: kf)
+    // avoids flicker AND lets a predictive-echo paint survive until the real keyframe differs. A pane
+    // the helper can't render shows a diagnostic banner (blankWithDiagnostic) or keeps its last good
+    // frame (keepLastGoodKeyframe), instead of silently going blank.
+    let unsupportedPanes = fetcher.latestUnsupported()
+    for (pane, surface) in remotePaneSurfaces {
+        let ansiStr: String
+        if let u = unsupportedPanes[pane], u.fallback != "keepLastGoodKeyframe" {
+            ansiStr = RemoteGridRenderer.unsupportedBanner(reason: u.reason, fallback: u.fallback)
+        } else if let kf = keyframes[pane] {
+            ansiStr = RemoteGridRenderer.ansi(for: kf)
+        } else {
+            continue
+        }
         if lastRemoteAnsi[pane] == ansiStr { continue }
         lastRemoteAnsi[pane] = ansiStr
         let ansi = Data(ansiStr.utf8)
         ansi.withUnsafeBytes { raw in
             insanitty_surface_inject_output(P(surface), raw.bindMemory(to: CChar.self).baseAddress, ansi.count)
         }
-        if pane == remoteActivePane {
+        if pane == remoteActivePane, let kf = keyframes[pane] {
             let content = kf.rows.map { $0.cells.map { $0.text }.joined() }.joined(separator: " ")
                 .trimmingCharacters(in: .whitespaces).prefix(4000)
             vlog("insanitty: remote pane \(pane) content: \(content)\n")

@@ -303,6 +303,20 @@ final class RemoteGridRendererTests: XCTestCase {
         XCTAssertTrue(ansi.contains("\u{1b}[24;1H"), "should position the 24th row")
         XCTAssertTrue(ansi.contains("\u{1b}[\(kf.cursor.row + 1);\(kf.cursor.column + 1)H"), "cursor")
     }
+
+    func testCursorShapeEmitsDECSCUSR() throws {
+        func render(shape: String) throws -> String {
+            let json = #"{"paneKeyframe":{"_0":{"workspaceID":"w","paneID":1,"paneGeneration":1,"keyframeID":1,"gridSize":{"columns":5,"rows":1},"rows":[{"index":0,"rowVersion":1,"text":"hi"}],"cursor":{"row":0,"column":0,"visible":true,"shape":"__S__","cursorVersion":1},"activeScreen":"primary","datagramsEnabledAfterKeyframe":true}}}"#
+                .replacingOccurrences(of: "__S__", with: shape)
+            guard case let .paneKeyframe(kf) = try RemoteGridProtocol.decode(line: json) else {
+                XCTFail("expected paneKeyframe"); return ""
+            }
+            return RemoteGridRenderer.ansi(for: kf)
+        }
+        XCTAssertTrue(try render(shape: "block").contains("\u{1b}[2 q"), "block → DECSCUSR 2")
+        XCTAssertTrue(try render(shape: "bar").contains("\u{1b}[6 q"), "bar → DECSCUSR 6")
+        XCTAssertTrue(try render(shape: "underline").contains("\u{1b}[4 q"), "underline → DECSCUSR 4")
+    }
 }
 
 final class SettingsTests: XCTestCase {

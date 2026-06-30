@@ -31,6 +31,7 @@ final class RemoteQuicFetcher {
     private var received = Data()
     private(set) var snapshot: WorkspaceSnapshot?
     private(set) var keyframes: [Int: PaneKeyframe] = [:]
+    private var unsupported: [Int: UnsupportedPaneState] = [:]   // panes the helper can't render
     private var expectedPanes: Set<Int>?
     let expectedPin: String
     var attach: [UInt8]
@@ -41,6 +42,12 @@ final class RemoteQuicFetcher {
     var inputPane = 0
     private var sendKeysBytes: [UInt8] = []; private var sendKeysBuf = QUIC_BUFFER()
     private var reqKfBytes: [UInt8] = [];    private var reqKfBuf = QUIC_BUFFER()
+    private var resizeBytes: [UInt8] = [];   private var resizeBuf = QUIC_BUFFER()
+    // The grid size to drive the remote panes to (cells). A detached tmux session sizes to whatever
+    // tiny default, so we resize it to a known dimension — matching the local control-mode default.
+    var targetCols = 110
+    var targetRows = 38
+    private var lastSentSize: (Int, Int)?
     var stream: OpaquePointer?               // the attach stream, kept to request a keyframe later (set from remoteConnCb)
     var heldConn: OpaquePointer?             // kept open in hold mode so repoll() reuses one connection
     var heldConfig: OpaquePointer?
@@ -91,6 +98,7 @@ final class RemoteQuicFetcher {
         if let active = snapshot?.panes.first(where: { $0.isActive })?.paneID ?? keyframes.keys.sorted().first {
             inputPane = active
         }
+        sendResizeIfNeeded()   // drive the remote grid to our target size before the first keyframe
         if !inputBytes.isEmpty {
             usleep(1_500_000)
             requestFreshKeyframe()
@@ -124,6 +132,7 @@ final class RemoteQuicFetcher {
         if let active = snapshot?.panes.first(where: { $0.isActive })?.paneID ?? keyframes.keys.sorted().first {
             inputPane = active
         }
+        sendResizeIfNeeded()   // re-drives the remote grid only if the target size changed
         if !inputBytes.isEmpty {
             sendInputIfNeeded(stream)
             usleep(1_500_000)
@@ -166,6 +175,20 @@ final class RemoteQuicFetcher {
         }
     }
 
+    /// Drive the remote pane to the target grid size (`resizePane`) so its content reflows to match
+    /// what we render, instead of staying at the tmux session's detached default. Sent only when the
+    /// size changes, so it's cheap to call every poll.
+    func sendResizeIfNeeded() {
+        guard let stream = stream else { return }
+        if let last = lastSentSize, last == (targetCols, targetRows) { return }
+        lastSentSize = (targetCols, targetRows)
+        resizeBytes = Array("{\"type\":\"resizePane\",\"workspaceID\":\"\(workspaceID)\",\"paneID\":\(inputPane),\"columns\":\(targetCols),\"rows\":\(targetRows)}\n".utf8)
+        resizeBytes.withUnsafeMutableBufferPointer { bp in
+            resizeBuf.Length = UInt32(bp.count); resizeBuf.Buffer = bp.baseAddress
+            _ = api.pointee.StreamSend(stream, &resizeBuf, 1, QUIC_SEND_FLAG_NONE, nil)
+        }
+    }
+
     /// Ask the remote for a full keyframe — called after a delay so the shell has processed the
     /// forwarded keystrokes and the echoed output is in the captured grid.
     func requestFreshKeyframe() {
@@ -186,6 +209,12 @@ final class RemoteQuicFetcher {
         return keyframes
     }
 
+    /// A thread-safe copy of the panes the helper reported it can't render (with reason/fallback).
+    func latestUnsupported() -> [Int: UnsupportedPaneState] {
+        lock.lock(); defer { lock.unlock() }
+        return unsupported
+    }
+
     /// Ingest a single QUIC datagram: a `paneDelta` (apply onto the pane's keyframe) or, defensively,
     /// a `paneKeyframe` (replace). Datagrams are whole messages (not newline-framed like the stream).
     func ingestDatagram(_ ptr: UnsafePointer<UInt8>, _ len: Int) {
@@ -197,9 +226,11 @@ final class RemoteQuicFetcher {
         case .paneDelta(let delta):
             if let kf = keyframes[delta.paneID] {
                 keyframes[delta.paneID] = RemoteGridDelta.apply(delta, to: kf)
+                unsupported[delta.paneID] = nil
                 applied = true
             }
-        case .paneKeyframe(let kf): keyframes[kf.paneID] = kf; applied = true
+        case .paneKeyframe(let kf): keyframes[kf.paneID] = kf; unsupported[kf.paneID] = nil; applied = true
+        case .unsupportedPaneState(let u): unsupported[u.paneID] = u; applied = true
         default: break
         }
         lock.unlock()
@@ -225,14 +256,17 @@ final class RemoteQuicFetcher {
                   let msg = try? RemoteGridProtocol.decode(line: line) else { continue }
             switch msg {
             case .workspaceSnapshot(let s): snapshot = s; expectedPanes = Set(s.panes.map { $0.paneID })
-            case .paneKeyframe(let kf): keyframes[kf.paneID] = kf; applied = true
+            case .paneKeyframe(let kf): keyframes[kf.paneID] = kf; unsupported[kf.paneID] = nil; applied = true
             case .paneDelta(let delta):
                 if let kf = keyframes[delta.paneID] {
                     keyframes[delta.paneID] = RemoteGridDelta.apply(delta, to: kf)
+                    unsupported[delta.paneID] = nil
                     applied = true
                     vlog("insanitty: applied remote delta (\(lineData.count) bytes, stream)\n")
                 }
-            default: break
+            case .unsupportedPaneState(let u):
+                unsupported[u.paneID] = u; applied = true
+                vlog("insanitty: pane \(u.paneID) unsupported: \(u.reason) (fallback \(u.fallback))\n")
             }
         }
         if let exp = expectedPanes, !exp.isEmpty, exp.isSubset(of: Set(keyframes.keys)) { sem.signal() }
