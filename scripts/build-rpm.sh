@@ -36,6 +36,19 @@ EOF
 
 say "3/4 Generate the spec"
 mkdir -p "$TOP/SPECS" "$TOP/RPMS"
+# List only what actually got staged — the remote helper (/usr/libexec) is optional (its source is
+# the unbundled Fantastty tree), so don't list it in %files when it wasn't built.
+FILES=""
+[ -e "$STAGE/usr/bin/insanitty" ]                     && FILES+="/usr/bin/insanitty
+"
+[ -d "$STAGE/usr/lib/$PKG" ]                          && FILES+="/usr/lib/$PKG
+"
+[ -d "$STAGE/usr/libexec/$PKG" ]                      && FILES+="/usr/libexec/$PKG
+"
+[ -d "$STAGE/usr/share/$PKG" ]                        && FILES+="/usr/share/$PKG
+"
+[ -e "$STAGE/usr/share/applications/insanitty.desktop" ] && FILES+="/usr/share/applications/insanitty.desktop
+"
 cat > "$TOP/SPECS/$PKG.spec" <<EOF
 Name:           $PKG
 Version:        $RPMVER
@@ -60,11 +73,7 @@ mkdir -p %{buildroot}
 cp -a %{stage}/. %{buildroot}/
 
 %files
-/usr/bin/insanitty
-/usr/lib/$PKG
-/usr/libexec/$PKG
-/usr/share/$PKG
-/usr/share/applications/insanitty.desktop
+$FILES
 
 %changelog
 * Mon Jan 01 2024 insanitty <jesse@primeradiant.com> - $RPMVER-1
