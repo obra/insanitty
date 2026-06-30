@@ -4,6 +4,7 @@
 # splits are tmux-owned and survive restarts (the parity gap the control-mode refactor closes).
 set -uo pipefail
 cd "$(dirname "$0")/.."
+export INSANITTY_VERBOSE=1   # the assertions below grep insanitty's diagnostic stderr traces
 GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 SHOT="${OUT:-docs/images}/e2e-12-layout-restore.png"
 [ -x build/insanitty ] || { echo "build the app first: scripts/build-app.sh"; exit 1; }

@@ -16,6 +16,15 @@ import FoundationNetworking   // URLSession lives here on Linux
 import Glibc
 #endif
 
+// Diagnostic tracing. Off by default so a normal session is quiet; the e2e suite sets
+// INSANITTY_VERBOSE=1 and asserts on these lines. Genuine errors/fatals log unconditionally
+// (they call FileHandle.standardError directly), this only gates the high-frequency per-frame,
+// per-delta, and lifecycle traces.
+let insanittyVerbose = ProcessInfo.processInfo.environment["INSANITTY_VERBOSE"] != nil
+@inline(__always) func vlog(_ message: @autoclosure () -> String) {
+    if insanittyVerbose { FileHandle.standardError.write(Data(message().utf8)) }
+}
+
 nonisolated(unsafe) var gapp: OpaquePointer?
 nonisolated(unsafe) var mainWindow: OpaquePointer?
 nonisolated(unsafe) var mainStack: OpaquePointer?
@@ -89,7 +98,7 @@ let oscHandlerCb: @convention(c) (UnsafePointer<UInt8>?, Int) -> Bool = { ptr, l
     }
     workspaceMeta[id] = m; saveWorkspaceMeta()
     if notesWorkspaceID == id { rebuildNotesList() }   // live-refresh the notes panel if open
-    FileHandle.standardError.write(Data("insanitty: consumed OSC \(body.prefix(48))\n".utf8))
+    vlog("insanitty: consumed OSC \(body.prefix(48))\n")
     return true
 }
 
@@ -500,7 +509,7 @@ func toggleOverview() {
         gtk_box_append(P(box), P(frame)); gtk_box_append(P(box), P(label))
         gtk_flow_box_append(P(flow), P(box))
     }
-    FileHandle.standardError.write(Data("insanitty: overview shown (\(tiles.count) workspaces)\n".utf8))
+    vlog("insanitty: overview shown (\(tiles.count) workspaces)\n")
     gtk_widget_set_visible(P(bg), 1)
 }
 
@@ -583,7 +592,7 @@ func addBrowserTab(to tabView: OpaquePointer, url: String) {
 func newBrowserTabInCurrentWorkspace() {
     guard let tabView = currentTabView() else { return }
     addBrowserTab(to: tabView, url: "https://duckduckgo.com")
-    FileHandle.standardError.write(Data("insanitty: browser tab opened\n".utf8))
+    vlog("insanitty: browser tab opened\n")
     saveLayout()
 }
 
@@ -810,7 +819,7 @@ final class ControlModeWorkspace {
                 g_object_unref(raw(s))
             }
         }
-        FileHandle.standardError.write(Data("tmux-cc: window @\(window) → \(newPanes.count)-pane layout\n".utf8))
+        vlog("tmux-cc: window @\(window) → \(newPanes.count)-pane layout\n")
     }
 
     /// A tmux window closed → remove its tab and release its pane surfaces.
@@ -1235,7 +1244,7 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
         if let widget = widget { gtk_box_append(P(container), P(widget)) }
         lastRemoteTreeSig = sig
         lastRemoteAnsi = [:]
-        FileHandle.standardError.write(Data("insanitty: rendered \(keyframes.count)-pane remote workspace (native QUIC)\n".utf8))
+        vlog("insanitty: rendered \(keyframes.count)-pane remote workspace (native QUIC)\n")
     }
 
     remoteActivePane = fetcher.snapshot?.panes.first(where: { $0.isActive })?.paneID
@@ -1255,7 +1264,7 @@ func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
         if pane == remoteActivePane {
             let content = kf.rows.map { $0.cells.map { $0.text }.joined() }.joined(separator: " ")
                 .trimmingCharacters(in: .whitespaces).prefix(4000)
-            FileHandle.standardError.write(Data("insanitty: remote pane \(pane) content: \(content)\n".utf8))
+            vlog("insanitty: remote pane \(pane) content: \(content)\n")
         }
     }
 }

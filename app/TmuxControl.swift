@@ -57,7 +57,7 @@ final class TmuxControlClient {
         // Tell tmux this control client's size so it sizes the window/panes to match the surfaces
         // (a detached session is tiny, and a -CC client's pty size doesn't drive the window).
         send("refresh-client -C \(sizeCols)x\(sizeRows)")
-        FileHandle.standardError.write(Data("tmux-cc: attached \(session) (fd \(masterFD))\n".utf8))
+        vlog("tmux-cc: attached \(session) (fd \(masterFD))\n")
         return true
     }
 
@@ -101,7 +101,7 @@ final class TmuxControlClient {
             }
             if !loggedRender {
                 loggedRender = true
-                FileHandle.standardError.write(Data("tmux-cc: rendered \(bytes.count) bytes from pane %\(pane)\n".utf8))
+                vlog("tmux-cc: rendered \(bytes.count) bytes from pane %\(pane)\n")
             }
         case .layoutChange(let window, let layout):
             if let tree = TmuxLayoutParser.parse(layout) { onLayout?(window, tree) }

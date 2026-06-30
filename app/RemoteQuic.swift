@@ -157,7 +157,7 @@ final class RemoteQuicFetcher {
     /// instance var so it outlives the async StreamSend.
     func sendInputIfNeeded(_ stream: OpaquePointer?) {
         guard !inputBytes.isEmpty else { return }
-        FileHandle.standardError.write(Data("insanitty: forwarding \(inputBytes.count) input byte(s) to pane \(inputPane)\n".utf8))
+        vlog("insanitty: forwarding \(inputBytes.count) input byte(s) to pane \(inputPane)\n")
         let b64 = Data(inputBytes).base64EncodedString()
         sendKeysBytes = Array("{\"type\":\"sendKeys\",\"workspaceID\":\"\(workspaceID)\",\"paneID\":\(inputPane),\"data\":\"\(b64)\"}\n".utf8)
         sendKeysBytes.withUnsafeMutableBufferPointer { bp in
@@ -204,7 +204,7 @@ final class RemoteQuicFetcher {
         }
         lock.unlock()
         if applied {
-            FileHandle.standardError.write(Data("insanitty: applied remote datagram (\(len) bytes)\n".utf8))
+            vlog("insanitty: applied remote datagram (\(len) bytes)\n")
         }
         onDatagramApplied?()
     }
@@ -230,7 +230,7 @@ final class RemoteQuicFetcher {
                 if let kf = keyframes[delta.paneID] {
                     keyframes[delta.paneID] = RemoteGridDelta.apply(delta, to: kf)
                     applied = true
-                    FileHandle.standardError.write(Data("insanitty: applied remote delta (\(lineData.count) bytes, stream)\n".utf8))
+                    vlog("insanitty: applied remote delta (\(lineData.count) bytes, stream)\n")
                 }
             default: break
             }

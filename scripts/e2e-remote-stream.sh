@@ -14,6 +14,7 @@
 # server is never touched.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+export INSANITTY_VERBOSE=1   # the assertions below grep insanitty's diagnostic stderr traces
 GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 SHOT="${OUT:-docs/images}/e2e-remote-stream.png"; LOG=/tmp/app-rstream.log
 [ -x build/insanitty ] || { echo "build the app first: scripts/build-app.sh"; exit 1; }

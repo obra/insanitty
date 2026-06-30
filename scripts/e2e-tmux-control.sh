@@ -7,6 +7,7 @@
 # Headless: Xvfb + matchbox + dbus. The tmux -CC workspace is enabled via INSANITTY_TMUX_CC.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+export INSANITTY_VERBOSE=1   # the assertions below grep insanitty's diagnostic stderr traces
 GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 DISP=":130"; SHOT="${OUT:-docs/images}/tmux-control.png"
 [ -x build/insanitty ] || { echo "build the app first: scripts/build-app.sh"; exit 1; }

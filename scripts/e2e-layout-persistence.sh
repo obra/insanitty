@@ -7,6 +7,7 @@
 # Headless: Xvfb + matchbox + dbus. Isolated via a throwaway XDG_STATE_HOME.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+export INSANITTY_VERBOSE=1   # the assertions below grep insanitty's diagnostic stderr traces
 GS="${GHOSTTY:-$PWD/vendor/ghostty}"
 DISP=":129"
 export XDG_STATE_HOME=/tmp/ins-layout-state
