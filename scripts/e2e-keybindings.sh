@@ -19,13 +19,24 @@ Xvfb "$DISP" -screen 0 1100x720x24 >/tmp/xvfb-keys.log 2>&1 & XVFB=$!; sleep 2
 DISPLAY="$DISP" matchbox-window-manager >/tmp/wm-keys.log 2>&1 & WM=$!; sleep 1
 DISPLAY="$DISP" XDG_CONFIG_HOME=/tmp/inscfg GHOSTTY_RESOURCES_DIR="$GS/zig-out/share/ghostty" LD_LIBRARY_PATH="$GS/zig-out/lib" \
   dbus-run-session -- ./build/insanitty >/tmp/app-keys.log 2>&1 & APP=$!
+LAYOUT="$XDG_STATE_HOME/insanitty/layout.json"
 sleep 5
 DISPLAY="$DISP" xdotool mousemove 110 115 click 1; sleep 1   # focus the window (workspace 0 row)
-DISPLAY="$DISP" xdotool key ctrl+shift+a; sleep 2            # toggle attention
-DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null
 
-if grep -q '"needsAttention" : true' "$WS" 2>/dev/null && grep -q '"insanitty-ws-0"' "$WS"; then
-  echo "KEYBINDINGS E2E PASS: Ctrl+Shift+A flagged the workspace (needsAttention persisted) ($SHOT)"
-else
-  echo "KEYBINDINGS E2E FAIL"; cat "$WS" 2>/dev/null || echo "(no workspaces.json)"; exit 1
-fi
+# 1. Ctrl+Shift+A flags the current workspace.
+DISPLAY="$DISP" xdotool key ctrl+shift+a; sleep 2
+grep -q '"needsAttention" : true' "$WS" 2>/dev/null && grep -q '"insanitty-ws-0"' "$WS" \
+  || { echo "KEYBINDINGS E2E FAIL: Ctrl+Shift+A did not flag the workspace"; cat "$WS" 2>/dev/null; exit 1; }
+
+# 2. Ctrl+2 jumps directly to the 2nd workspace (row index 1 → tmux index 1), persisted as `selected`.
+DISPLAY="$DISP" xdotool key ctrl+2; sleep 2
+grep -q '"selected" : 1' "$LAYOUT" 2>/dev/null \
+  || { echo "KEYBINDINGS E2E FAIL: Ctrl+2 did not select workspace 2"; cat "$LAYOUT" 2>/dev/null; exit 1; }
+
+# 3. Ctrl+Shift+L clears every attention flag at once.
+DISPLAY="$DISP" xdotool key ctrl+shift+l; sleep 2
+DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null
+grep -q '"needsAttention" : false' "$WS" 2>/dev/null \
+  || { echo "KEYBINDINGS E2E FAIL: Ctrl+Shift+L did not clear the attention flag"; cat "$WS" 2>/dev/null; exit 1; }
+
+echo "KEYBINDINGS E2E PASS: Ctrl+Shift+A flagged, Ctrl+2 jumped to workspace 2, Ctrl+Shift+L cleared all flags ($SHOT)"

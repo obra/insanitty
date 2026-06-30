@@ -26,12 +26,13 @@ DISPLAY="$DISP" XDG_CONFIG_HOME=/tmp/inscfg GHOSTTY_RESOURCES_DIR="$GS/zig-out/s
 sleep 5
 # Open Preferences (gear icon, header bar top-right, left of the window controls).
 DISPLAY="$DISP" xdotool mousemove 957 27 click 1; sleep 2
-# Toggle the "Show tab thumbnails in sidebar" row (AdwSwitchRow is activatable — click the row).
+# Toggle the "Predictive echo" row in the Remote Engine group (AdwSwitchRow is activatable — click
+# the row). It defaults on, so toggling persists remotePredictiveEcho=false.
 DISPLAY="$DISP" xdotool mousemove 320 260 click 1; sleep 2
 DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null
 
 # Assert: the toggle persisted, and the dark appearance survived the write.
-if grep -q '"tabsInSidebar" : true' "$SETTINGS" && grep -q '"appearance" : "dark"' "$SETTINGS"; then
+if grep -q '"remotePredictiveEcho" : false' "$SETTINGS" && grep -q '"appearance" : "dark"' "$SETTINGS"; then
   echo "SETTINGS E2E PASS: dark theme applied at startup; toggling a row persisted to settings.json ($SHOT)"
 else
   echo "SETTINGS E2E FAIL: settings.json did not reflect the toggle"; echo "--- settings.json ---"; cat "$SETTINGS"

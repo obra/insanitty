@@ -20,32 +20,24 @@ public enum AppearanceMode: String, Codable, CaseIterable, Equatable {
 /// User preferences, persisted to XDG state (`settings.json`). Keys mirror Fantastty's SettingsView.
 public struct Settings: Codable, Equatable {
     public var appearance: AppearanceMode
-    public var tabsInSidebar: Bool
-    public var persistentSessions: Bool
     public var remotePredictiveEcho: Bool
 
     public init(appearance: AppearanceMode = .system,
-                tabsInSidebar: Bool = false,
-                persistentSessions: Bool = false,
                 remotePredictiveEcho: Bool = true) {
         self.appearance = appearance
-        self.tabsInSidebar = tabsInSidebar
-        self.persistentSessions = persistentSessions
         self.remotePredictiveEcho = remotePredictiveEcho
     }
 
     enum CodingKeys: String, CodingKey {
-        case appearance, tabsInSidebar, persistentSessions, remotePredictiveEcho
+        case appearance, remotePredictiveEcho
     }
 
     /// Tolerant decode: any missing key falls back to its default, so older/newer settings files
-    /// (and partial writes) load without error.
+    /// (and partial writes — including ones with keys we no longer use) load without error.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = Settings()
         appearance = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? d.appearance
-        tabsInSidebar = try c.decodeIfPresent(Bool.self, forKey: .tabsInSidebar) ?? d.tabsInSidebar
-        persistentSessions = try c.decodeIfPresent(Bool.self, forKey: .persistentSessions) ?? d.persistentSessions
         remotePredictiveEcho = try c.decodeIfPresent(Bool.self, forKey: .remotePredictiveEcho) ?? d.remotePredictiveEcho
     }
 }

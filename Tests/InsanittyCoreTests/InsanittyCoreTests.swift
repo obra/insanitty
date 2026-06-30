@@ -323,8 +323,6 @@ final class SettingsTests: XCTestCase {
     func testDefaults() {
         let s = Settings()
         XCTAssertEqual(s.appearance, .system)
-        XCTAssertFalse(s.tabsInSidebar)
-        XCTAssertFalse(s.persistentSessions)
         XCTAssertTrue(s.remotePredictiveEcho)
     }
 
@@ -338,9 +336,20 @@ final class SettingsTests: XCTestCase {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ins-settings-\(UUID().uuidString)/settings.json")
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let s = Settings(appearance: .dark, tabsInSidebar: true, persistentSessions: true, remotePredictiveEcho: false)
+        let s = Settings(appearance: .dark, remotePredictiveEcho: false)
         try SettingsStore.save(s, to: url)
         XCTAssertEqual(SettingsStore.load(from: url), s)
+    }
+
+    func testLoadsFileWithRemovedKeys() throws {
+        // Older settings.json carried tabsInSidebar/persistentSessions; they must still load.
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ins-old-\(UUID().uuidString)/settings.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try #"{"appearance":"dark","tabsInSidebar":true,"persistentSessions":true,"remotePredictiveEcho":false}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(SettingsStore.load(from: url), Settings(appearance: .dark, remotePredictiveEcho: false))
     }
 
     func testLoadMissingReturnsDefaults() {

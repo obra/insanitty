@@ -149,6 +149,7 @@ func setTileAttention(_ tileIdx: Int, _ on: Bool) {
     guard tileIdx >= 0, tileIdx < tiles.count else { return }
     gtk_label_set_text(P(tiles[tileIdx].label), (on ? "\u{26A0} " : "") + tiles[tileIdx].name)
 }
+
 nonisolated(unsafe) var tiles: [WorkspaceTile] = []
 nonisolated(unsafe) var sidebarList: OpaquePointer?
 nonisolated(unsafe) var currentWorkspace = 0
@@ -303,6 +304,24 @@ func selectNextFlaggedWorkspace() {
             gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(i))))); return
         }
     }
+}
+
+/// Jump directly to the Nth workspace in the sidebar (1-based) — Ctrl+1…9.
+func selectWorkspaceByNumber(_ n: Int) {
+    guard let list = sidebarList, n >= 1, n <= tiles.count else { return }
+    gtk_list_box_select_row(P(list), P(OP(gtk_list_box_get_row_at_index(P(list), Int32(n - 1)))))
+}
+
+/// Clear the attention (⚠) flag on every workspace at once — Ctrl+Shift+L.
+func clearAllAttention() {
+    for (i, tile) in tiles.enumerated() where tile.index >= 0 {
+        let id = "insanitty-ws-\(tile.index)"
+        guard var m = workspaceMeta[id], m.needsAttention else { continue }
+        m.needsAttention = false; m.modifiedAt = Date()
+        workspaceMeta[id] = m
+        setTileAttention(i, false)
+    }
+    saveWorkspaceMeta()
 }
 
 /// Add a workspace page to the stack and a live-thumbnail row to the custom sidebar.
@@ -1303,8 +1322,6 @@ let settingsThemeCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutab
 let settingsSwitchCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { row, _, ud in
     let active = adw_switch_row_get_active(P(row)) != 0
     switch Int(bitPattern: ud) {
-    case 1: currentSettings.tabsInSidebar = active
-    case 2: currentSettings.persistentSessions = active
     case 3: currentSettings.remotePredictiveEcho = active
     default: break
     }
@@ -1341,20 +1358,18 @@ func openSettings() {
     adw_preferences_group_add(P(appearance), P(themeRow))
     adw_preferences_page_add(P(page), P(appearance))
 
-    let sidebar = OP(adw_preferences_group_new())!
-    adw_preferences_group_set_title(P(sidebar), "Sidebar")
-    adw_preferences_group_add(P(sidebar), P(makeSwitchRow("Show tab thumbnails in sidebar", nil, tag: 1, on: currentSettings.tabsInSidebar)))
-    adw_preferences_page_add(P(page), P(sidebar))
-
-    let sessions = OP(adw_preferences_group_new())!
-    adw_preferences_group_set_title(P(sessions), "Sessions")
-    adw_preferences_group_add(P(sessions), P(makeSwitchRow("Persistent terminal sessions", "Terminals run inside tmux; sessions survive app restarts.", tag: 2, on: currentSettings.persistentSessions)))
-    adw_preferences_page_add(P(page), P(sessions))
-
     let remote = OP(adw_preferences_group_new())!
     adw_preferences_group_set_title(P(remote), "Remote Engine")
     adw_preferences_group_add(P(remote), P(makeSwitchRow("Predictive echo", "Show typed keys immediately, before the remote echoes them back.", tag: 3, on: currentSettings.remotePredictiveEcho)))
     adw_preferences_page_add(P(page), P(remote))
+
+    let sessions = OP(adw_preferences_group_new())!
+    adw_preferences_group_set_title(P(sessions), "Sessions")
+    let sessionInfo = OP(adw_action_row_new())!   // informational: persistence is unconditional here
+    adw_preferences_row_set_title(P(sessionInfo), "Persistent sessions")
+    adw_action_row_set_subtitle(P(sessionInfo), "Terminals always run inside tmux, so sessions survive app restarts.")
+    adw_preferences_group_add(P(sessions), P(sessionInfo))
+    adw_preferences_page_add(P(page), P(sessions))
 
     let integrations = OP(adw_preferences_group_new())!
     adw_preferences_group_set_title(P(integrations), "Integrations")
@@ -1658,6 +1673,10 @@ func buildWindow() {
         if ctrl && (keyval == GDK_KEY_w || keyval == GDK_KEY_W) { closeCurrentTab(); return 1 }
         if ctrl && shift && (keyval == GDK_KEY_a || keyval == GDK_KEY_A) { toggleCurrentAttention(); return 1 }
         if ctrl && shift && (keyval == GDK_KEY_f || keyval == GDK_KEY_F) { selectNextFlaggedWorkspace(); return 1 }
+        if ctrl && shift && (keyval == GDK_KEY_l || keyval == GDK_KEY_L) { clearAllAttention(); return 1 }  // clear all ⚠
+        if ctrl && keyval >= GDK_KEY_1 && keyval <= GDK_KEY_9 {                                              // jump to workspace N
+            selectWorkspaceByNumber(Int(keyval) - Int(GDK_KEY_1) + 1); return 1
+        }
         return 0
     }
     let keyctl = OP(gtk_event_controller_key_new())
