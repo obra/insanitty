@@ -28,7 +28,10 @@ let insanittyVerbose = ProcessInfo.processInfo.environment["INSANITTY_VERBOSE"] 
 nonisolated(unsafe) var gapp: OpaquePointer?
 nonisolated(unsafe) var mainWindow: OpaquePointer?
 nonisolated(unsafe) var mainStack: OpaquePointer?
-nonisolated(unsafe) var remotePaneContainer: OpaquePointer?            // box holding the remote pane tree
+nonisolated(unsafe) var remoteTabView: OpaquePointer?                  // AdwTabView: one tab per remote window
+nonisolated(unsafe) var remoteWindowContainers: [Int: OpaquePointer] = [:]  // remote window id → pane-tree box
+nonisolated(unsafe) var remoteWindowTreeSig: [Int: String] = [:]      // per-window layout signature
+nonisolated(unsafe) var remoteSuppressTabSelect = false               // ignore our own programmatic tab selection
 nonisolated(unsafe) var remotePaneSurfaces: [Int: OpaquePointer] = [:] // remote pane id → surface
 nonisolated(unsafe) var pendingFetcher: RemoteQuicFetcher?
 nonisolated(unsafe) var remoteActivePane = 0                           // pane to forward keystrokes to
@@ -50,7 +53,6 @@ let remoteDatagramRenderIdle: @convention(c) (UnsafeMutableRawPointer?) -> gbool
     if let s = s { renderRemoteWorkspace(s) }
     return 0
 }
-nonisolated(unsafe) var lastRemoteTreeSig = ""               // layout signature; rebuild the tree only on change
 nonisolated(unsafe) var lastRemoteAnsi: [Int: String] = [:]  // per-pane painted ANSI; re-inject only on change
 nonisolated(unsafe) var workspaceCounter = 3 // 0..2 are created at startup
 nonisolated(unsafe) var settingsURL = SettingsStore.defaultURL()
@@ -264,6 +266,10 @@ func currentTabView() -> OpaquePointer? {
 
 /// New terminal tab in the current workspace.
 func newTabInCurrentWorkspace() {
+    // On the remote (QUIC) workspace a new tab is a new remote tmux window (newWindow request).
+    if currentWorkspace >= 0, currentWorkspace < tiles.count, tiles[currentWorkspace].index == -1 {
+        remoteSession?.queueNewWindow(); return
+    }
     // Control-mode workspaces add a tab via a tmux window (`new-window`); %window-add builds the tab.
     if let cw = currentControlWorkspace() { cw.client.send("new-window"); return }
     addTab(to: currentTabView())
@@ -729,12 +735,46 @@ func makeRemoteWorkspacePage() -> OpaquePointer? {
     adw_tab_bar_set_view(P(tabBar), P(tabView))
     gtk_box_append(P(vbox), P(tabBar))
     gtk_box_append(P(vbox), P(tabView))
+    remoteTabView = tabView
+    // A tab per remote tmux window is created on demand by renderRemoteWorkspace; clicking a tab
+    // forwards a selectWindow request to the remote.
+    g_signal_connect_data(raw(tabView), "notify::selected-page", unsafeBitCast(remoteTabSelectedCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    return vbox
+}
+
+/// Ensure a tab + pane-tree container exists for remote window `windowID`; return its container box.
+func ensureRemoteWindowTab(_ tabView: OpaquePointer, windowID: Int, title: String) -> OpaquePointer? {
+    if let c = remoteWindowContainers[windowID] { return c }
     let box = OP(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))!
     gtk_widget_set_vexpand(P(box), 1)
-    remotePaneContainer = box
-    let page = OP(adw_tab_view_append(P(tabView), P(box)))
-    adw_tab_page_set_title(P(page), "Remote (QUIC)")
-    return vbox
+    remoteWindowContainers[windowID] = box
+    let page = OP(adw_tab_view_append(P(tabView), P(box)))!
+    adw_tab_page_set_title(P(page), title.isEmpty ? "window @\(windowID)" : title)
+    return box
+}
+
+/// Drop a remote window's tab (it closed remotely) and release its pane surfaces.
+func closeRemoteWindowTab(_ windowID: Int, panes: [Int]) {
+    guard let tabView = remoteTabView, let box = remoteWindowContainers.removeValue(forKey: windowID) else { return }
+    if let page = OP(adw_tab_view_get_page(P(tabView), P(box))) { adw_tab_view_close_page(P(tabView), P(page)) }
+    remoteWindowTreeSig[windowID] = nil
+    for pane in panes {
+        if let s = remotePaneSurfaces.removeValue(forKey: pane) {
+            if gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
+            g_object_unref(raw(s))
+        }
+        lastRemoteAnsi[pane] = nil
+    }
+}
+
+/// A remote window tab was clicked → forward a selectWindow request (unless we set it ourselves).
+let remoteTabSelectedCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { tabViewPtr, _, _ in
+    guard !remoteSuppressTabSelect, let tabView = tabViewPtr,
+          let page = OP(adw_tab_view_get_selected_page(P(tabView))),
+          let child = OP(adw_tab_page_get_child(P(page))) else { return }
+    if let (wid, _) = remoteWindowContainers.first(where: { raw($0.value) == raw(child) }) {
+        remoteSession?.queueSelectWindow(wid)
+    }
 }
 
 /// Run a shell command to completion (used to ensure the tmux control session exists).
@@ -1286,7 +1326,7 @@ func runProcess(_ path: String, _ args: [String], stdin: String? = nil) -> Data?
 /// (SPKI-pinned) and collect the snapshot + pane keyframes — and on the GTK main thread map the
 /// panes onto GtkPaned splits, painting each keyframe via inject_output. No subprocess for QUIC.
 func injectRemoteGrid() {
-    guard remotePaneContainer != nil else { return }
+    guard remoteTabView != nil else { return }
     // Test hook: render a jsonl fixture of remote messages instead of connecting, to exercise the
     // multi-pane mapping (the live multi-pane path needs the helper's --tmux-session, unavailable here).
     if let fixture = ProcessInfo.processInfo.environment["INSANITTY_REMOTE_FIXTURE"] {
@@ -1362,37 +1402,72 @@ let remoteRenderIdle: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { 
     return 0 // G_SOURCE_REMOVE
 }
 
-/// Map the remote workspace's panes (the active window's layout) onto a GtkPaned tree of inert
-/// surfaces, then inject each pane's keyframe (rendered to ANSI).
+/// Map each remote tmux window onto its own tab — a GtkPaned tree of inert surfaces — then inject
+/// each pane's keyframe (rendered to ANSI). Windows appearing/closing add/remove tabs; the active
+/// window's tab is selected; clicking a tab forwards selectWindow.
 func renderRemoteWorkspace(_ fetcher: RemoteQuicFetcher) {
-    guard let container = remotePaneContainer else { return }
+    guard let tabView = remoteTabView else { return }
     let keyframes = fetcher.latestKeyframes()   // thread-safe snapshot (datagrams mutate off-main)
-    let windows = fetcher.snapshot?.windows ?? []
-    let layout = (windows.first(where: { $0.isActive }) ?? windows.first)?.layout
-    let tree: TmuxLayoutNode
-    if let layout = layout, let parsed = TmuxLayoutParser.parse(layout) {
-        tree = parsed
-    } else if let pane = keyframes.keys.sorted().first {
-        tree = .leaf(pane: pane)   // no usable layout → a single pane
-    } else { return }
+    let panes = fetcher.snapshot?.panes ?? []
+    let paneWindow = Dictionary(panes.map { ($0.paneID, $0.windowID) }, uniquingKeysWith: { a, _ in a })
+    var windows = fetcher.snapshot?.windows ?? []
+    // Default (non-tmux) source, or a fixture without a window list: synthesize a single window 0
+    // holding whatever panes we have keyframes for.
+    if windows.isEmpty, !keyframes.isEmpty {
+        windows = [WorkspaceWindow(windowID: 0, title: "Remote", index: 0, isActive: true, layout: nil)]
+    }
+    guard !windows.isEmpty else { return }
 
-    // Rebuild the GtkPaned tree only when the layout / pane-set changes — otherwise the surfaces
-    // stay put across polls (no flicker). A relayout forces a repaint of every pane.
-    let sig = (layout ?? "leaf") + "|" + keyframes.keys.sorted().map(String.init).joined(separator: ",")
-    if sig != lastRemoteTreeSig {
-        for (_, s) in remotePaneSurfaces where gtk_widget_get_parent(P(s)) != nil { gtk_widget_unparent(P(s)) }
-        while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
-        let widget = buildPaneTree(tree) { pane in
-            if remotePaneSurfaces[pane] == nil { remotePaneSurfaces[pane] = makeRemotePaneSurface() }
-            return remotePaneSurfaces[pane]
-        }
-        if let widget = widget { gtk_box_append(P(container), P(widget)) }
-        lastRemoteTreeSig = sig
-        lastRemoteAnsi = [:]
-        vlog("insanitty: rendered \(keyframes.count)-pane remote workspace (native QUIC)\n")
+    // The pane tree for a window: its tmux layout, or — lacking one — a single leaf from its panes.
+    func tree(for w: WorkspaceWindow) -> TmuxLayoutNode? {
+        if let layout = w.layout, let parsed = TmuxLayoutParser.parse(layout) { return parsed }
+        let mine = keyframes.keys.filter { (paneWindow[$0] ?? (windows.count == 1 ? w.windowID : -99)) == w.windowID }.sorted()
+        return mine.first.map { .leaf(pane: $0) }
     }
 
-    remoteActivePane = fetcher.snapshot?.panes.first(where: { $0.isActive })?.paneID
+    var rebuilt = false
+    for w in windows {
+        guard let node = tree(for: w), let container = ensureRemoteWindowTab(tabView, windowID: w.windowID, title: w.title) else { continue }
+        if let page = OP(adw_tab_view_get_page(P(tabView), P(container))) {
+            adw_tab_page_set_title(P(page), w.title.isEmpty ? "window @\(w.windowID)" : w.title)
+        }
+        let sig = (w.layout ?? "leaf") + "|" + node.allPanes().sorted().map(String.init).joined(separator: ",")
+        if remoteWindowTreeSig[w.windowID] != sig {
+            for pane in node.allPanes() where remotePaneSurfaces[pane].map({ gtk_widget_get_parent(P($0)) != nil }) == true {
+                gtk_widget_unparent(P(remotePaneSurfaces[pane]!))
+            }
+            while let old = OP(gtk_widget_get_first_child(P(container))) { gtk_box_remove(P(container), P(old)) }
+            let widget = buildPaneTree(node) { pane in
+                if remotePaneSurfaces[pane] == nil { remotePaneSurfaces[pane] = makeRemotePaneSurface() }
+                return remotePaneSurfaces[pane]
+            }
+            if let widget = widget { gtk_box_append(P(container), P(widget)) }
+            remoteWindowTreeSig[w.windowID] = sig
+            for pane in node.allPanes() { lastRemoteAnsi[pane] = nil }   // force repaint into new surfaces
+            rebuilt = true
+        }
+    }
+    if rebuilt {
+        let totalPanes = windows.compactMap { tree(for: $0)?.allPanes().count }.reduce(0, +)
+        vlog("insanitty: rendered \(totalPanes)-pane remote workspace (native QUIC), \(windows.count) window(s)\n")
+    }
+
+    // Drop tabs for windows that closed remotely.
+    let live = Set(windows.map { $0.windowID })
+    for wid in remoteWindowContainers.keys where !live.contains(wid) {
+        closeRemoteWindowTab(wid, panes: paneWindow.filter { $0.value == wid }.map { $0.key })
+    }
+
+    // Select the active window's tab (without re-emitting a selectWindow back to the remote).
+    if let active = windows.first(where: { $0.isActive }) ?? windows.first,
+       let container = remoteWindowContainers[active.windowID],
+       let page = OP(adw_tab_view_get_page(P(tabView), P(container))) {
+        remoteSuppressTabSelect = true
+        adw_tab_view_set_selected_page(P(tabView), P(page))
+        remoteSuppressTabSelect = false
+    }
+
+    remoteActivePane = panes.first(where: { $0.isActive })?.paneID
         ?? keyframes.keys.sorted().first ?? 0
 
     // Paint only the panes whose content changed since the last poll. Skipping unchanged panes

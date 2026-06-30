@@ -43,6 +43,8 @@ final class RemoteQuicFetcher {
     private var sendKeysBytes: [UInt8] = []; private var sendKeysBuf = QUIC_BUFFER()
     private var reqKfBytes: [UInt8] = [];    private var reqKfBuf = QUIC_BUFFER()
     private var resizeBytes: [UInt8] = [];   private var resizeBuf = QUIC_BUFFER()
+    private var winReqBytes: [UInt8] = [];   private var winReqBuf = QUIC_BUFFER()
+    private var pendingWindowReqs: [String] = []   // newWindow/selectWindow JSON, drained by repoll
     // The grid size to drive the remote panes to (cells). A detached tmux session sizes to whatever
     // tiny default, so we resize it to a known dimension — matching the local control-mode default.
     var targetCols = 110
@@ -133,7 +135,8 @@ final class RemoteQuicFetcher {
             inputPane = active
         }
         sendResizeIfNeeded()   // re-drives the remote grid only if the target size changed
-        if !inputBytes.isEmpty {
+        let sentWindowReq = sendQueuedWindowRequests()   // newWindow/selectWindow from the UI
+        if !inputBytes.isEmpty || sentWindowReq {
             sendInputIfNeeded(stream)
             usleep(1_500_000)
             requestFreshKeyframe()
@@ -173,6 +176,33 @@ final class RemoteQuicFetcher {
             sendKeysBuf.Length = UInt32(bp.count); sendKeysBuf.Buffer = bp.baseAddress
             _ = api.pointee.StreamSend(stream, &sendKeysBuf, 1, QUIC_SEND_FLAG_NONE, nil)
         }
+    }
+
+    /// Queue a `newWindow` request (a UI action); the next repoll forwards it and refreshes the grid.
+    func queueNewWindow() {
+        lock.lock(); pendingWindowReqs.append("{\"type\":\"newWindow\",\"workspaceID\":\"\(workspaceID)\"}"); lock.unlock()
+    }
+
+    /// Queue a `selectWindow` request for the given window id (a UI tab switch).
+    func queueSelectWindow(_ windowID: Int) {
+        lock.lock(); pendingWindowReqs.append("{\"type\":\"selectWindow\",\"workspaceID\":\"\(workspaceID)\",\"windowID\":\(windowID)}"); lock.unlock()
+    }
+
+    /// Forward any queued window requests on the stream. Called from `repoll` (serialized), so the
+    /// single reused buffer is sent one request at a time; returns whether anything was sent.
+    @discardableResult
+    func sendQueuedWindowRequests() -> Bool {
+        lock.lock(); let reqs = pendingWindowReqs; pendingWindowReqs = []; lock.unlock()
+        guard let stream = stream, !reqs.isEmpty else { return false }
+        for req in reqs {
+            winReqBytes = Array((req + "\n").utf8)
+            winReqBytes.withUnsafeMutableBufferPointer { bp in
+                winReqBuf.Length = UInt32(bp.count); winReqBuf.Buffer = bp.baseAddress
+                _ = api.pointee.StreamSend(stream, &winReqBuf, 1, QUIC_SEND_FLAG_NONE, nil)
+            }
+            usleep(50_000)   // let each request flush before the buffer is reused
+        }
+        return true
     }
 
     /// Drive the remote pane to the target grid size (`resizePane`) so its content reflows to match

@@ -102,3 +102,4 @@ jobs:
           ./scripts/e2e-remote-gui.sh
           ./scripts/e2e-remote-live.sh
           ./scripts/e2e-remote-stream.sh
+          ./scripts/e2e-remote-windows.sh
