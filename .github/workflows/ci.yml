@@ -15,6 +15,7 @@ jobs:
 
       - name: Install Swift (swiftly)
         run: |
+          sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev   # Swift toolchain runtime dep
           curl -fsSL -o /tmp/swiftly.tar.gz "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz"
           mkdir -p /tmp/swiftly-bin && tar -xf /tmp/swiftly.tar.gz -C /tmp/swiftly-bin
           # init and install must agree on the home dir; use swiftly's default and source its env so

@@ -22,7 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config git curl xvfb gettext meson ninja-build dpkg-dev \
-            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libcurl4-openssl-dev
 
       - name: blueprint-compiler ${{ env.BLUEPRINT_VERSION }} (from source; apt's is too old)
         run: |
