@@ -1566,6 +1566,7 @@ let rowSelectedCb: @convention(c) (OpaquePointer?, OpaquePointer?, UnsafeMutable
 
 /// Header "Overview" button clicked → toggle the Exposé overview.
 let overviewBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in toggleOverview() }
+let newWorkspaceBtnCb: @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void = { _, _ in addWorkspace() }
 
 /// Persist the current settings (best-effort).
 func saveSettings() { try? SettingsStore.save(currentSettings, to: settingsURL) }
@@ -1990,6 +1991,10 @@ func buildWindow() {
     gtk_widget_set_tooltip_text(P(archivedBtn), "Archived & trashed workspaces (restore)")
     g_signal_connect_data(raw(archivedBtn), "clicked", unsafeBitCast(archivedBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
     adw_header_bar_pack_start(P(header), P(archivedBtn))
+    let newBtn = OP(gtk_button_new_from_icon_name("list-add-symbolic"))!
+    gtk_widget_set_tooltip_text(P(newBtn), "New workspace (Ctrl+N)")
+    g_signal_connect_data(raw(newBtn), "clicked", unsafeBitCast(newWorkspaceBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
+    adw_header_bar_pack_start(P(header), P(newBtn))
     let settingsBtn = OP(gtk_button_new_from_icon_name("emblem-system-symbolic"))!
     gtk_widget_set_tooltip_text(P(settingsBtn), "Settings")
     g_signal_connect_data(raw(settingsBtn), "clicked", unsafeBitCast(settingsBtnCb, to: GCallback.self), nil, nil, GConnectFlags(rawValue: 0))
